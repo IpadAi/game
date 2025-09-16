@@ -1,861 +1,1999 @@
-// game.js  — Mobile-first single-file platformer
-// Author: ChatGPT (rewritten for the user). Drop into same folder as index.html.
 
-/* --------------------------------------------------------
-   Canvas & Resize
-   -------------------------------------------------------- */
 const canvas = document.getElementById("gameCanvas");
 const ctx = canvas.getContext("2d");
-
-// set canvas size to window
-function resizeCanvas() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-}
-window.addEventListener("resize", resizeCanvas);
+function resizeCanvas(){canvas.width=window.innerWidth;canvas.height=window.innerHeight}
+window.addEventListener("resize",resizeCanvas);
 resizeCanvas();
-
-/* --------------------------------------------------------
-   DOM references for mobile UI
-   -------------------------------------------------------- */
-const titleOverlay = document.getElementById("titleOverlay");
-const hudSmall = document.getElementById("hudSmall");
-const btnLeft = document.getElementById("btnLeft");
-const btnRight = document.getElementById("btnRight");
-const btnUp = document.getElementById("btnUp");
-const btnShoot = document.getElementById("btnShoot");
-const btnPause = document.getElementById("btnPause");
-const titleHighScore = document.getElementById("titleHighScore");
-
-/* --------------------------------------------------------
-   Assets (images)
-   -------------------------------------------------------- */
-const characterSprite = new Image();
-characterSprite.src =
-  "https://sdk.bitmoji.com/me/sticker/x9YP40td1zJHcC64oQ4htyATyVeig0bGqzyNqTVZDdcLWVJHRfxSeg/10207747.png?p=dD1zO2w9ZW4.v1&size=thumbnail";
-
-const flagSprite = new Image();
-flagSprite.src = "https://pngimg.com/d/flags_PNG14697.png";
-
-const coinSprite = new Image();
-coinSprite.src = "https://pngimg.com/d/coin_PNG36871.png";
-
-/* fireball sprite intentionally blank; drawing fallback provided */
-const fireballSprite = new Image();
-fireballSprite.src = ""; // no external file, use circle fallback
-
-/* --------------------------------------------------------
-   Audio (simple WebAudio synthesized sounds)
-   -------------------------------------------------------- */
-const AudioCtx = window.AudioContext || window.webkitAudioContext;
-let audioCtx = null;
-function ensureAudio() {
-  if (!audioCtx) {
-    try { audioCtx = new AudioCtx(); }
-    catch (e) { audioCtx = null; }
-  }
-}
-function playBeep(freq = 440, type = "sine", duration = 0.08, volume = 0.08) {
-  if (!audioCtx) return;
-  try {
-    const o = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-    o.type = type;
-    o.frequency.value = freq;
-    g.gain.value = volume;
-    o.connect(g);
-    g.connect(audioCtx.destination);
-    o.start();
-    o.stop(audioCtx.currentTime + duration);
-  } catch (e) { /* ignore */ }
-}
-function playCoin() { playBeep(1200, "square", 0.06, 0.06); }
-function playJump() { playBeep(780, "sine", 0.06, 0.08); }
-function playPowerup() { playBeep(620, "sawtooth", 0.12, 0.09); }
-function playHit() { playBeep(220, "sine", 0.12, 0.12); }
-function playWin() { playBeep(880, "triangle", 0.22, 0.12); }
-
-/* --------------------------------------------------------
-   Game constants & state
-   -------------------------------------------------------- */
-const TICKS_PER_SECOND = 60;
-const DEFAULT_LEVEL_SECONDS = 160;
-const highScoreKey = "mobile_platformer_highscore";
-
-let cameraX = 0;
-let levelIndex = 0;
-let levels = [];
-let gameOver = false;
-let gameWon = false;
-let coinsCollected = 0;
-let score = 0;
-let lives = 5;
-
-let levelTimer = 0; // in ticks
-let showTitle = true;
-let paused = false;
-
-/* --------------------------------------------------------
-   Player (original preserved + mobile-friendly additions)
-   -------------------------------------------------------- */
-const player = {
-  x: 60,
-  y: 0,
-  width: 36,
-  height: 48,
-  speed: 4.4,
-  jumpPower: 15,
-  gravity: 0.9,
-  vy: 0,
-  jumping: false,
-  invincible: false,
-  invincibleTimer: 0,
-  hasFire: false,
-  fireCooldown: 0,
-  facing: 1,
-  respawnX: 80,
-  respawnY: 0
-};
-
-/* --------------------------------------------------------
-   Input (keyboard + touch)
-   -------------------------------------------------------- */
-const keys = { left:false, right:false, up:false, shoot:false };
-const touchState = { left:false, right:false, up:false, shoot:false, pause:false };
-
-document.addEventListener("keydown", (e) => {
-  if (e.code === "ArrowLeft" || e.key === "a") keys.left = true;
-  if (e.code === "ArrowRight" || e.key === "d") keys.right = true;
-  if (e.code === "ArrowUp" || e.key === "Space" || e.key === "w") {
-    if (!player.jumping) { player.vy = -player.jumpPower; player.jumping = true; playJump(); }
-  }
-  if (e.code === "KeyK") keys.shoot = true;
-  if (e.code === "KeyP") { paused = !paused; }
-  if (e.code === "Escape") { showTitle = true; paused = false; }
-});
-document.addEventListener("keyup", (e) => {
-  if (e.code === "ArrowLeft" || e.key === "a") keys.left = false;
-  if (e.code === "ArrowRight" || e.key === "d") keys.right = false;
-  if (e.code === "KeyK") keys.shoot = false;
-});
-
-/* Touch button wiring */
-function bindTouchButtons() {
-  const bind = (el, prop) => {
-    if (!el) return;
-    el.addEventListener("touchstart", (ev) => { ev.preventDefault(); touchState[prop] = true; }, {passive:false});
-    el.addEventListener("touchend", (ev) => { ev.preventDefault(); touchState[prop] = false; }, {passive:false});
-    el.addEventListener("mousedown", () => { touchState[prop] = true; });
-    el.addEventListener("mouseup", () => { touchState[prop] = false; });
-    el.addEventListener("mouseleave", () => { touchState[prop] = false; });
-  };
-  bind(btnLeft, "left");
-  bind(btnRight, "right");
-  bind(btnUp, "up");
-  bind(btnShoot, "shoot");
-  bind(btnPause, "pause");
-  // pause button toggles game
-  if (btnPause) btnPause.addEventListener("click", () => { paused = !paused; });
-}
-bindTouchButtons();
-
-/* Helper to reflect touch into keys in update */
-function applyTouchToKeys() {
-  if (touchState.left) { keys.left = true; player.facing = -1; }
-  else if (!keys.left) keys.left = false;
-  if (touchState.right) { keys.right = true; player.facing = 1; }
-  else if (!keys.right) keys.right = false;
-  if (touchState.up && !player.jumping) { player.jumping = true; player.vy = -player.jumpPower; playJump(); }
-  if (touchState.shoot) keys.shoot = true; else if (!keys.shoot) keys.shoot = false;
-}
-
-/* --------------------------------------------------------
-   Utility: rectangles overlap
-   -------------------------------------------------------- */
-function rectsOverlap(a,b) {
-  return a && b && (a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y);
-}
-
-/* --------------------------------------------------------
-   Parallax background
-   -------------------------------------------------------- */
-let bgLayers = [];
-function initBackground() {
-  bgLayers = [
-    { name: "sky", speed:0, draw: ()=>{} },
-    { name: "clouds", speed:0.12, clouds: makeClouds(10), draw(offset){ ctx.globalAlpha=0.9; ctx.fillStyle="#fff"; this.clouds.forEach(c=>drawCloud((c.x - offset*this.speed) % (canvas.width*2) - 120, c.y, c.scale)); ctx.globalAlpha=1; } },
-    { name: "mountains", speed:0.36, draw(offset){ ctx.fillStyle="#6b8e23"; for(let i=-2;i<6;i++){ const mx = i*400 + (-offset*this.speed % 400); ctx.beginPath(); ctx.moveTo(mx, canvas.height); ctx.lineTo(mx+200, canvas.height-180); ctx.lineTo(mx+400, canvas.height); ctx.closePath(); ctx.fill(); } } },
-    { name: "trees", speed:0.65, draw(offset){ ctx.fillStyle="#2f4f2f"; for(let i=-2;i<10;i++){ const tx = i*160 + (-offset*this.speed % 160); ctx.fillRect(tx+20, canvas.height-220, 20, 80); ctx.beginPath(); ctx.ellipse(tx+30, canvas.height-240, 48, 32, 0, 0, Math.PI*2); ctx.fill(); } } }
-  ];
-}
-function makeClouds(n) {
-  const arr=[];
-  for(let i=0;i<n;i++){ arr.push({ x: Math.random()* (canvas.width*2), y: 30 + Math.random()*160, scale: 0.6 + Math.random()*1.4 }); }
-  return arr;
-}
-function drawCloud(x,y,scale=1) {
-  ctx.save();
-  ctx.translate(x,y);
-  ctx.beginPath();
-  ctx.ellipse(20*scale, 12*scale, 26*scale, 14*scale, 0, 0, Math.PI*2);
-  ctx.ellipse(48*scale, 6*scale, 28*scale, 16*scale, 0, 0, Math.PI*2);
-  ctx.ellipse(76*scale, 14*scale, 24*scale, 12*scale, 0, 0, Math.PI*2);
-  ctx.fill();
-  ctx.restore();
-}
-
-/* --------------------------------------------------------
-   Level generator (preserves original structures)
-   -------------------------------------------------------- */
-function createLevels() {
-  levels = [];
-  const mobileScale = Math.min(1, canvas.width / 900);
-  for (let li=0; li<10; li++) {
-    const difficulty = li+1;
-    const levelWidth = Math.round((2200 + li*500) * (1 - (1-mobileScale)*0.2)); // shrink a bit on small screens
-    const groundY = Math.round(canvas.height * 0.42);
-
-    // stairs
-    const stairs = [];
-    const stairClusters = 2 + Math.floor(difficulty*0.6);
-    for (let s=0; s<stairClusters; s++) {
-      const baseX = 300 + (s*(levelWidth-600))/stairClusters;
-      const steps = 4 + Math.floor(difficulty/3);
-      for (let step=0; step<steps; step++){
-        stairs.push({ x: baseX + step*36, y: groundY - (step+1)*28, width:36, height:28 });
-      }
-    }
-
-    // pits
-    const pits=[];
-    const pitCount = Math.floor(difficulty/3);
-    for (let p=0;p<pitCount;p++){
-      const px = 800 + p*400 + Math.random()*120;
-      const width = 60 + difficulty*10;
-      pits.push({ x:px, y:groundY, width, height: canvas.height-groundY });
-    }
-
-    // goombas
-    const goombas=[];
-    const gCount = Math.max(1, 1 + Math.floor(difficulty*1.6) - (canvas.width<600?1:0));
-    for (let g=0; g<gCount; g++){
-      const gx = 400 + g*200 + Math.random()*100;
-      const speed = 0.8 + difficulty*0.2;
-      goombas.push({ x:gx, y:groundY-28, width:28, height:28, speed, dir: Math.random()>0.5?1:-1, minX: gx-40, maxX: gx+40, dead:false, animTimer: Math.floor(Math.random()*30) });
-    }
-
-    // spikes
-    const spikes=[];
-    const spikeCount = Math.min(2 + difficulty, 8);
-    for (let sp=0; sp<spikeCount; sp++){
-      const sx = 600 + sp*250 + Math.random()*60;
-      spikes.push({ x:sx, y:groundY-12, width:28, height:12 });
-    }
-
-    // coins
-    const coins=[];
-    const coinCount = Math.max(8, 20 + difficulty*4 - (canvas.width<600?8:0));
-    for (let c=0; c<coinCount; c++){
-      const cx = 200 + c*100 + Math.random()*60;
-      const cy = groundY - 80 - Math.random()*100;
-      coins.push({ x:cx, y:cy, width:20, height:20, collected:false, anim: Math.random()*8 });
-    }
-
-    // power-ups
-    const powerUps=[];
-    if (difficulty >= 3) {
-      powerUps.push({ type: Math.random() < 0.4 ? "fire" : "life", x: 600 + difficulty*120 + Math.random()*80, y: groundY - 40, width:28, height:28, taken:false });
-    }
-
-    // mystery boxes
-    const mysteryBoxes=[];
-    const boxCount = 2 + Math.floor(difficulty/2);
-    for (let b=0; b<boxCount; b++){
-      const bx = 400 + b*400 + Math.random()*140;
-      const by = groundY - 120 - Math.random()*80;
-      mysteryBoxes.push({ x:bx, y:by, width:28, height:28, used:false, reward: Math.random() < 0.5 ? "coin" : (Math.random() < 0.75 ? "life" : "star") });
-    }
-
-    // flag
-    const flag = { x: levelWidth - 120, y: groundY - 90, width: 28, height: 56 };
-
-    // cannons
-    const cannons = [];
-    const cannonCount = Math.floor(difficulty/2);
-    for (let c=0; c<cannonCount; c++){
-      const cx = 500 + c*600 + Math.random()*220;
-      cannons.push({ x:cx, y:groundY-28, width:28, height:28, dir: Math.random()>0.5? -1 : 1, cooldown: 80 + Math.floor(Math.random()*120), timer: Math.floor(Math.random()*60)});
-    }
-
-    // bats
-    const bats=[];
-    const batCount = Math.max(0, Math.floor(difficulty*1.1) - (canvas.width<600?1:0));
-    for (let b=0; b<batCount; b++){
-      const bx = 300 + Math.random()*(levelWidth-600);
-      const baseY = groundY - 140 - Math.random()*100;
-      bats.push({ x:bx, y:baseY, baseY, width:36, height:22, speed: 1.0 + difficulty*0.08, dir: Math.random()>0.5?1:-1, amplitude: 30 + Math.random()*40, freq: 0.02 + Math.random()*0.02, dead:false, anim: Math.random()*4});
-    }
-
-    // checkpoints (a few per level)
-    const checkpoints=[];
-    const cpCount = Math.min(3, Math.max(1, Math.floor(levelWidth/1000)));
-    for (let cp=0; cp<cpCount; cp++){
-      const cx = 200 + (cp * (levelWidth - 400)) / (cpCount - 0.0001);
-      checkpoints.push({ x: cx, y: groundY - 120, width: 20, height: 80, active: false });
-    }
-
-    // particles container
-    const particles = [];
-
-    // level seconds scaled with difficulty
-    const levelSeconds = Math.max(DEFAULT_LEVEL_SECONDS - difficulty*8, 60);
-
-    levels.push({ width: levelWidth, groundY, stairs, pits, goombas, spikes, coins, powerUps, mysteryBoxes, flag, cannons, bats, checkpoints, particles, levelSeconds });
-  }
-}
-
-/* --------------------------------------------------------
-   Init / Reset
-   -------------------------------------------------------- */
-function initGame() {
-  ensureAudio();
-  initBackground();
-  createLevels();
-  resetToLevel(0);
-  lastTime = performance.now();
-  requestAnimationFrame(gameLoop);
-}
-function resetToLevel(idx) {
-  if (idx === 0) {
-    lives = 5; coinsCollected = 0; score = 0;
-  }
-  levelIndex = idx;
-  const L = levels[levelIndex];
-  player.x = 80;
-  player.y = L.groundY - player.height;
-  player.respawnX = player.x;
-  player.respawnY = player.y;
-  player.vy = 0; player.jumping = false; player.invincible = false; player.invincibleTimer = 0; player.hasFire = false; player.fireCooldown = 0;
-  cameraX = 0; gameOver = false; gameWon = false; paused = false;
-
-  L.coins.forEach(c=> c.collected=false);
-  L.goombas.forEach(g=> g.dead=false);
-  L.powerUps.forEach(p=> p.taken=false);
-  L.mysteryBoxes.forEach(b=> b.used=false);
-  L.cannons.forEach(c=> c.timer = Math.floor(Math.random()*c.cooldown));
-  L.bats.forEach(b=> b.dead=false);
-  L.checkpoints.forEach(c=> c.active=false);
-  L.particles.length = 0;
-
-  levelTimer = L.levelSeconds * TICKS_PER_SECOND;
-}
-
-/* --------------------------------------------------------
-   Projectiles & particles
-   -------------------------------------------------------- */
-const fireballs = [];
-function spawnPlayerFire(x,y,dir) {
-  fireballs.push({ x,y,vx: 6*dir, vy: -1.5, width:12, height:12, life: 120, friendly:true });
-  playBeep(880,"sine",0.08,0.06);
-}
-function spawnEnemyFire(x,y,vx,vy) {
-  fireballs.push({ x,y,vx,vy,width:12,height:12,life: 200, friendly:false });
-}
-function spawnParticles(L, x,y, color="orange", count=8, speed=2) {
-  for (let i=0;i<count;i++){
-    L.particles.push({ x:x + Math.random()*8 - 4, y: y + Math.random()*8 - 4, vx: (Math.random()-0.5)*speed, vy: (Math.random()-0.5)*speed - 1, life: 30 + Math.floor(Math.random()*30), color });
-  }
-}
-
-/* --------------------------------------------------------
-   Damage & lives
-   -------------------------------------------------------- */
-function damagePlayer(ignoreCheckpoint=false) {
-  if (player.invincible) return;
-  playHit();
-  lives--;
-  player.invincible = true;
-  player.invincibleTimer = 120;
-  if (lives <= 0) {
-    gameOver = true;
-    saveHighScore();
-  } else {
-    // respawn at checkpoint or start
-    const rx = ignoreCheckpoint ? 80 : (player.respawnX || 80);
-    const ry = ignoreCheckpoint ? (levels[levelIndex].groundY - player.height) : (player.respawnY || (levels[levelIndex].groundY - player.height));
-    player.x = rx; player.y = ry; player.vy = 0; player.jumping = false;
-  }
-}
-
-/* --------------------------------------------------------
-   High score persistence
-   -------------------------------------------------------- */
-function saveHighScore() {
-  try {
-    const prev = parseInt(localStorage.getItem(highScoreKey) || "0", 10);
-    if (score > prev) localStorage.setItem(highScoreKey, String(score));
-  } catch (e) { /* ignore */ }
-}
-function getHighScore() {
-  try { return parseInt(localStorage.getItem(highScoreKey) || "0", 10); } catch(e){ return 0; }
-}
-
-/* --------------------------------------------------------
-   Update — main logic (keeps original behavior + extras)
-   -------------------------------------------------------- */
-function update() {
-  if (showTitle || paused) return;
-  if (gameOver || gameWon) return;
-
-  const L = levels[levelIndex];
-
-  // apply touch controls
-  applyTouchToKeys();
-
-  // horizontal movement
-  if (keys.left) { player.x -= player.speed; player.facing = -1; }
-  if (keys.right) { player.x += player.speed; player.facing = 1; }
-  player.x = Math.max(0, Math.min(L.width - player.width, player.x));
-
-  // animation bookkeeping omitted (we use simple sprite)
-
-  // gravity
-  player.y += player.vy;
-  player.vy += player.gravity;
-
-  // pit detection (original)
-  const onPit = L.pits && L.pits.some(pit =>
-    player.x + player.width > pit.x && player.x < pit.x + pit.width && player.y + player.height >= pit.y
-  );
-  if (!onPit && player.y + player.height >= L.groundY) {
-    player.y = L.groundY - player.height;
-    player.vy = 0;
-    player.jumping = false;
-  }
-
-  // stairs collisions
-  L.stairs.forEach(st => {
-    if (rectsOverlap(player, st) && player.vy >= 0) {
-      player.y = st.y - player.height;
-      player.vy = 0;
-      player.jumping = false;
-    }
-  });
-
-  // goombas
-  L.goombas.forEach(g => {
-    if (g.dead) return;
-    g.x += g.speed * g.dir;
-    if (g.x < g.minX) g.dir = 1;
-    if (g.x + g.width > g.maxX) g.dir = -1;
-    g.animTimer = (g.animTimer + 1) % 30;
-
-    if (rectsOverlap(player, g)) {
-      if (player.invincible) { g.dead = true; score += 100; spawnParticles(L, g.x + g.width/2, g.y + g.height/2, "brown", 10); }
-      else if (player.vy > 0 && player.y + player.height - g.y < 18) {
-        g.dead = true; player.vy = -player.jumpPower*0.6; score += 100; playBeep(740, "square", 0.06, 0.08);
-      } else {
-        damagePlayer();
-      }
-    }
-  });
-
-  // bats
-  L.bats.forEach(b => {
-    if (b.dead) return;
-    b.x += b.speed * b.dir;
-    b.y = b.baseY + Math.sin(performance.now()*b.freq + b.x) * b.amplitude * 0.5;
-    if (b.x < 0) b.dir = 1;
-    if (b.x > L.width) b.dir = -1;
-    b.anim = (b.anim + 0.2) % 4;
-    if (rectsOverlap(player, b)) {
-      if (player.invincible) { b.dead = true; score += 120; spawnParticles(L, b.x, b.y, "gray", 8); }
-      else damagePlayer();
-    }
-  });
-
-  // cannons
-  L.cannons.forEach(c => {
-    c.timer++;
-    if (c.timer >= c.cooldown) {
-      c.timer = 0;
-      const dx = (player.x + player.width/2) - (c.x + c.width/2);
-      const dy = (player.y + player.height/2) - (c.y + c.height/2) - 20;
-      const dist = Math.sqrt(dx*dx + dy*dy) || 1;
-      const vx = (dx / dist) * (3 + Math.random()*1.5);
-      const vy = (dy / dist) * (3 + Math.random()*1.0);
-      spawnEnemyFire(c.x, c.y - 8, vx, vy);
-    }
-  });
-
-  // spikes
-  L.spikes.forEach(sp => { if (!player.invincible && rectsOverlap(player, sp)) damagePlayer(); });
-
-  // coins
-  L.coins.forEach(c => {
-    if (!c.collected && rectsOverlap(player, c)) {
-      c.collected = true; coinsCollected++; score += 10; playCoin(); spawnParticles(L, c.x + 8, c.y + 8, "gold", 6, 1.6);
-    }
-    if (!c.collected) c.anim = (c.anim + 0.2) % 8;
-  });
-
-  // power-ups
-  L.powerUps.forEach(p => {
-    if (!p.taken && rectsOverlap(player, p)) {
-      p.taken = true;
-      if (p.type === "life") { lives++; playPowerup(); }
-      else if (p.type === "star") { player.invincible = true; player.invincibleTimer = 600; playPowerup(); }
-      else if (p.type === "fire") { player.hasFire = true; playPowerup(); }
-    }
-  });
-
-  // mystery boxes (if hit from below)
-  L.mysteryBoxes.forEach(b => {
-    if (!b.used && rectsOverlap(player, b) && player.vy < 0) {
-      b.used = true;
-      if (b.reward === "coin") { coinsCollected++; score += 10; playCoin(); }
-      else if (b.reward === "life") { lives++; playPowerup(); }
-      else if (b.reward === "star") { player.invincible = true; player.invincibleTimer = 600; playPowerup(); }
-    }
-  });
-
-  // checkpoints
-  L.checkpoints.forEach(cp => {
-    if (!cp.active && rectsOverlap(player, cp)) {
-      cp.active = true;
-      player.respawnX = cp.x + 10; player.respawnY = cp.y + cp.height - player.height;
-      playBeep(1000, "sine", 0.08, 0.07);
-    }
-  });
-
-  // invincibility timer
-  if (player.invincibleTimer > 0) { player.invincibleTimer--; if (player.invincibleTimer === 0) player.invincible = false; }
-
-  // shooting
-  if (player.hasFire && player.fireCooldown > 0) player.fireCooldown--;
-  if (keys.shoot && player.hasFire && player.fireCooldown <= 0) {
-    const sx = player.x + (player.facing === 1 ? player.width : -12);
-    const sy = player.y + player.height/2;
-    spawnPlayerFire(sx, sy, player.facing);
-    player.fireCooldown = 18;
-  }
-
-  // fireballs update
-  for (let i = fireballs.length -1; i >= 0; i--) {
-    const f = fireballs[i];
-    f.x += f.vx; f.y += f.vy; f.vy += 0.12; f.life--;
-    if (f.x < 0 || f.x > L.width || f.y > canvas.height + 200 || f.life <= 0) { fireballs.splice(i,1); continue; }
-    let removed = false;
-    if (f.friendly) {
-      L.goombas.forEach(g => { if (!g.dead && rectsOverlap(f,g)) { g.dead = true; score += 80; spawnParticles(L, g.x+8, g.y+8, "brown", 8); removed = true; } });
-      L.bats.forEach(b => { if (!b.dead && rectsOverlap(f,b)) { b.dead = true; score += 120; spawnParticles(L, b.x, b.y, "gray", 8); removed = true; } });
-      L.cannons.forEach(c => { if (rectsOverlap(f,c)) { c.timer = Math.max(0, c.timer - 40); removed = true; } });
-      if (removed) { fireballs.splice(i,1); playBeep(640, "square", 0.06, 0.06); continue; }
-    } else {
-      if (!player.invincible && rectsOverlap(f, player)) { fireballs.splice(i,1); damagePlayer(); continue; }
-    }
-  }
-
-  // particles update
-  for (let i=L.particles.length -1; i>=0; i--) {
-    const p = L.particles[i];
-    p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.life--;
-    if (p.life <= 0) L.particles.splice(i,1);
-  }
-
-  // flag
-  if (rectsOverlap(player, L.flag)) {
-    if (levelIndex < levels.length -1) {
-      playWin();
-      resetToLevel(levelIndex + 1);
-      return;
-    } else {
-      gameWon = true;
-      saveHighScore();
-      playWin();
-      return;
-    }
-  }
-
-  // falling out
-  if (player.y > canvas.height + 150) damagePlayer();
-
-  // camera follow
-  cameraX = Math.max(0, Math.min(player.x - canvas.width * 0.3, L.width - canvas.width));
-
-  // timer countdown
-  levelTimer--;
-  if (levelTimer <= 0) damagePlayer(true);
-}
-
-/* --------------------------------------------------------
-   Draw — all visuals (HUD scaled for mobile)
-   -------------------------------------------------------- */
-function draw() {
-  // background gradient
-  const grad = ctx.createLinearGradient(0,0,0,canvas.height);
-  grad.addColorStop(0,"#87ceeb"); grad.addColorStop(1,"#a0d6ff");
-  ctx.fillStyle = grad; ctx.fillRect(0,0,canvas.width,canvas.height);
-
-  const L = levels[levelIndex];
-
-  // parallax layers
-  bgLayers.forEach(layer => {
-    ctx.save();
-    ctx.translate(-cameraX * (layer.speed || 0), 0);
-    layer.draw(cameraX);
-    ctx.restore();
-  });
-
-  // level drawing
-  ctx.save(); ctx.translate(-cameraX, 0);
-
-  // ground
-  ctx.fillStyle = "#b5651d"; ctx.fillRect(0, L.groundY, L.width, canvas.height - L.groundY);
-
-  // pits
-  ctx.fillStyle = "#4d2b00"; L.pits.forEach(p=> ctx.fillRect(p.x, p.y, p.width, p.height));
-
-  // stairs + wooden poles
-  L.stairs.forEach(st => {
-    ctx.fillStyle = "#a0522d"; ctx.fillRect(st.x, st.y, st.width, st.height);
-    ctx.fillStyle = "#654321"; ctx.fillRect(st.x + st.width/2 - 3, st.y + st.height, 6, L.groundY - (st.y + st.height));
-  });
-
-  // spikes
-  ctx.fillStyle = "black"; L.spikes.forEach(sp => { ctx.beginPath(); ctx.moveTo(sp.x, sp.y + sp.height); ctx.lineTo(sp.x + sp.width/2, sp.y); ctx.lineTo(sp.x + sp.width, sp.y + sp.height); ctx.fill(); });
-
-  // coins
-  L.coins.forEach(c => {
-    if (!c.collected) {
-      if (coinSprite.complete && coinSprite.naturalWidth !== 0) {
-        const wob = Math.sin(c.anim*0.5)*4;
-        ctx.drawImage(coinSprite, c.x, c.y + wob, c.width, c.height);
-      } else {
-        ctx.beginPath(); ctx.fillStyle="gold"; ctx.arc(c.x + c.width/2, c.y + c.height/2, c.width/2, 0, Math.PI*2); ctx.fill();
-      }
-    }
-  });
-
-  // power-ups
-  L.powerUps.forEach(p => {
-    if (!p.taken) {
-      if (p.type === "life") { ctx.fillStyle="red"; ctx.fillRect(p.x,p.y,p.width,p.height); ctx.fillStyle="white"; ctx.font="14px Arial"; ctx.fillText("+", p.x+6, p.y+18); }
-      else if (p.type === "star") { ctx.fillStyle="yellow"; ctx.beginPath(); ctx.arc(p.x + p.width/2, p.y + p.height/2, p.width/2, 0, Math.PI*2); ctx.fill(); }
-      else if (p.type === "fire") { ctx.fillStyle="orange"; ctx.fillRect(p.x,p.y,p.width,p.height); ctx.fillStyle="white"; ctx.font="12px Arial"; ctx.fillText("F", p.x+6, p.y+18); }
-    }
-  });
-
-  // mystery boxes
-  L.mysteryBoxes.forEach(b => {
-    if (!b.used) { ctx.fillStyle="orange"; ctx.fillRect(b.x,b.y,b.width,b.height); ctx.fillStyle="black"; ctx.font="20px Arial"; ctx.fillText("?", b.x+6, b.y+22); }
-    else { ctx.fillStyle="#8b4513"; ctx.fillRect(b.x,b.y,b.width,b.height); }
-  });
-
-  // goombas
-  ctx.fillStyle = "sienna"; L.goombas.forEach(g => {
-    if (!g.dead) {
-      const bob = Math.sin(g.animTimer*0.2)*2;
-      ctx.fillRect(g.x, g.y + bob, g.width, g.height);
-    } else {
-      ctx.fillStyle = "#3a2b1b"; ctx.fillRect(g.x, g.y + 14, g.width, 6); ctx.fillStyle = "sienna";
-    }
-  });
-
-  // bats
-  L.bats.forEach(b => {
-    if (!b.dead) {
-      ctx.save(); ctx.translate(b.x + b.width/2, b.y + b.height/2); ctx.scale(b.dir,1);
-      ctx.fillStyle = "gray";
-      ctx.beginPath(); ctx.moveTo(-b.width/2,0); ctx.quadraticCurveTo(-b.width/2 - 10, -10 - Math.sin(b.anim)*6, -b.width, -10); ctx.quadraticCurveTo(-b.width/2, -6, -b.width/2 + 10, -2); ctx.closePath(); ctx.fill();
-      ctx.restore();
-    } else {
-      ctx.fillStyle="rgba(120,120,120,0.6)"; ctx.fillRect(b.x, b.y, b.width, 4);
-    }
-  });
-
-  // cannons
-  L.cannons.forEach(c => {
-    ctx.fillStyle="#222"; ctx.fillRect(c.x, c.y - 8, c.width, c.height + 8);
-    ctx.fillStyle="#444"; ctx.fillRect(c.x + (c.dir === 1 ? c.width - 6 : 0), c.y - 12, 6, 6);
-  });
-
-  // checkpoints
-  L.checkpoints.forEach(cp => {
-    ctx.fillStyle = cp.active ? "yellow" : "white";
-    ctx.fillRect(cp.x, cp.y, 6, cp.height);
-    ctx.fillStyle = cp.active ? "orange" : "red";
-    ctx.fillRect(cp.x + 6, cp.y + 12, 18, 12);
-  });
-
-  // flag
-  if (flagSprite.complete && flagSprite.naturalWidth !== 0) ctx.drawImage(flagSprite, L.flag.x, L.flag.y, L.flag.width, L.flag.height);
-  else { ctx.fillStyle = "red"; ctx.fillRect(L.flag.x, L.flag.y, L.flag.width, L.flag.height); }
-
-  // fireballs
-  fireballs.forEach(f => {
-    if (fireballSprite.complete && fireballSprite.naturalWidth !== 0) ctx.drawImage(fireballSprite, f.x, f.y, f.width, f.height);
-    else {
-      ctx.beginPath(); ctx.fillStyle = f.friendly ? "orange" : "red"; ctx.arc(f.x + f.width/2, f.y + f.height/2, f.width/2, 0, Math.PI*2); ctx.fill();
-    }
-  });
-
-  // particles
-  L.particles.forEach(p => { ctx.globalAlpha = Math.max(0, Math.min(1, p.life/60)); ctx.fillStyle = p.color || "orange"; ctx.fillRect(p.x, p.y, 3, 3); ctx.globalAlpha = 1; });
-
-  // player
-  if (characterSprite.complete && characterSprite.naturalWidth !== 0) {
-    if (!(player.invincible && Math.floor(performance.now()/120) % 2 === 0)) {
-      ctx.drawImage(characterSprite, player.x, player.y, player.width, player.height);
-    }
-  } else {
-    ctx.fillStyle = "blue"; ctx.fillRect(player.x, player.y, player.width, player.height);
-  }
-
-  ctx.restore();
-
-  // HUD — adapt font sizes for mobile
-  const small = canvas.width < 600;
-  ctx.fillStyle = "black";
-  ctx.font = small ? "14px Arial" : "18px Arial";
-  ctx.fillText(`Lvl ${levelIndex+1}/${levels.length}`, 12, 24);
-  ctx.fillText(`Coins: ${coinsCollected}`, 12, 24 + (small?20:26));
-  ctx.fillText(`Score: ${score}`, 12, 24 + (small?40:52));
-  ctx.fillText(`Lives: ${lives}`, 12, 24 + (small?60:78));
-  if (player.invincible) ctx.fillText("Invincible!", 12, 24 + (small?80:104));
-  if (player.hasFire) ctx.fillText("Fire: Ready", canvas.width - 130, 24);
-
-  // level timer
-  const secondsLeft = Math.max(0, Math.floor(levelTimer / TICKS_PER_SECOND));
-  ctx.fillStyle = "black";
-  ctx.font = small ? "14px Arial" : "16px Arial";
-  ctx.fillText(`Time: ${secondsLeft}s`, canvas.width - (small?110:140), 24);
-
-  // top-right small panel for high score readability
-  ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(canvas.width - 220, 34, 200, 38);
-  ctx.fillStyle = "white"; ctx.font = "14px Arial"; ctx.fillText(`High: ${getHighScore()}`, canvas.width - 200, 58);
-
-  // overlays
-  if (paused) {
-    ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(0,0,canvas.width,canvas.height);
-    ctx.fillStyle = "white"; ctx.font = "46px Arial"; ctx.fillText("PAUSED", canvas.width/2 - 100, canvas.height/2);
-  }
-  if (gameOver) {
-    ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(0, canvas.height/2 - 60, canvas.width, 140);
-    ctx.fillStyle = "white"; ctx.font = "48px Arial"; ctx.fillText("GAME OVER", canvas.width/2 - 160, canvas.height/2);
-    ctx.font = "20px Arial"; ctx.fillText("Tap the screen to restart (or use buttons)", canvas.width/2 - 160, canvas.height/2 + 40);
-  } else if (gameWon) {
-    ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(0, canvas.height/2 - 60, canvas.width, 140);
-    ctx.fillStyle = "white"; ctx.font = "42px Arial"; ctx.fillText("YOU WIN!", canvas.width/2 - 100, canvas.height/2);
-    ctx.font = "20px Arial"; ctx.fillText(`Final Score: ${score}`, canvas.width/2 - 70, canvas.height/2 + 40);
-  }
-
-  // small help text at bottom
-  ctx.font = "12px Arial"; ctx.fillStyle = "rgba(0,0,0,0.6)";
-  ctx.fillText("Controls: use on-screen buttons or arrow keys/A-D (desktop).", 12, canvas.height - 12);
-
-  // also reflect minimal HUD into DOM for accessibility on tiny screens
-  hudSmall.innerHTML = `Lvl:${levelIndex+1} • Coins:${coinsCollected} • Score:${score} • Lives:${lives} • Time:${secondsLeft}s`;
-}
-
-/* --------------------------------------------------------
-   Game loop orchestration
-   -------------------------------------------------------- */
-let lastTime = performance.now();
-function gameLoop(now = performance.now()) {
-  const dt = now - lastTime;
-  lastTime = now;
-  // keep audio resumed on first gesture (some browsers)
-  if (!audioCtx && !showTitle) ensureAudio();
-
-  // update & draw
-  for (let i=0;i<1;i++) update();
-  draw();
-
-  if (!gameOver && !gameWon && !showTitle) requestAnimationFrame(gameLoop);
-  else if (showTitle) {
-    // draw title overlay remains handled by DOM element; but continue loop to flash
-    // we still want animation for parallax behind overlay
-    bgLayers.forEach(layer => {
-      // minor movement to animate clouds even while title is shown
-      if (layer.name === "clouds") layer.clouds.forEach(c => { c.x += 0.02; });
-    });
-    requestAnimationFrame(gameLoop);
-  }
-}
-
-/* --------------------------------------------------------
-   Title & click-to-start handling
-   -------------------------------------------------------- */
-function showTitleOverlay(show=true) {
-  showTitle = show;
-  if (show) {
-    titleOverlay.classList.remove("hidden");
-    titleHighScore.innerText = `High Score: ${getHighScore()}`;
-  } else {
-    titleOverlay.classList.add("hidden");
-  }
-}
-titleOverlay.addEventListener("click", (e) => {
-  // start/resume the game
-  ensureAudio();
-  showTitleOverlay(false);
-  lastTime = performance.now();
-  requestAnimationFrame(gameLoop);
-});
-
-/* restart on click when game over or win */
-canvas.addEventListener("click", () => {
-  if (!gameOver && !gameWon) return;
-  if (gameOver) { if (lives > 0) resetToLevel(levelIndex); else resetToLevel(0); showTitleOverlay(false); lastTime = performance.now(); requestAnimationFrame(gameLoop); }
-  else if (gameWon) { resetToLevel(0); showTitleOverlay(false); lastTime = performance.now(); requestAnimationFrame(gameLoop); }
-});
-
-/* keyboard Enter to restart */
-document.addEventListener("keydown", (e) => {
-  if (e.code === "Enter" && (gameOver || gameWon)) {
-    if (lives > 0) resetToLevel(levelIndex); else resetToLevel(0);
-    showTitleOverlay(false);
-    lastTime = performance.now();
-    requestAnimationFrame(gameLoop);
-  }
-});
-
-/* --------------------------------------------------------
-   Utilities & debug console integration
-   -------------------------------------------------------- */
-window.__MOBILEGAME = {
-  addCoins(n=10) { coinsCollected+=n; score += n*10; },
-  nextLevel() { resetToLevel(Math.min(levelIndex+1, levels.length-1)); },
-  giveLife() { lives++; },
-  setTime(s) { levelTimer = s * TICKS_PER_SECOND; },
-  toggleInvincible() { player.invincible = !player.invincible; },
-  teleport(x) { player.x = x; cameraX = Math.max(0, Math.min(player.x - canvas.width * 0.3, levels[levelIndex].width - canvas.width)); }
-};
-
-/* --------------------------------------------------------
-   Boot sequence: wait for images then start
-   -------------------------------------------------------- */
-let assetsLoaded = 0;
-function assetReady() { assetsLoaded++; if (assetsLoaded >= 3) { initGame(); showTitleOverlay(true); } }
-characterSprite.onload = assetReady;
-flagSprite.onload = assetReady;
-coinSprite.onload = assetReady;
-// If images fail to load quickly, still start after short timeout for mobile
-setTimeout(()=>{ if (assetsLoaded < 3) { initGame(); showTitleOverlay(true); } }, 2500);
-
-/* --------------------------------------------------------
-   End of file
-   -------------------------------------------------------- */
-
-/* Notes:
- - The file preserves and expands on your original features:
-   coins, goombas, spikes, pits, power-ups, mystery boxes, flags.
- - Added mobile-first responsive canvas, on-screen touch buttons, parallax,
-   additional enemies (bats, cannons), fireball projectile, checkpoints,
-   level timer, particles, simple WebAudio sounds, and persistence for high score.
- - Tweak constants (speeds, counts, timers) near top of file for balancing.
- - If you'd like audio samples instead of synth beeps, I can swap them in.
- - If you want the file split into modules, tell me and I will export separate files.
-*/
-
+const titleOverlay=document.getElementById("titleOverlay");
+const hudSmall=document.getElementById("hudSmall");
+const btnLeft=document.getElementById("btnLeft");
+const btnRight=document.getElementById("btnRight");
+const btnUp=document.getElementById("btnUp");
+const btnShoot=document.getElementById("btnShoot");
+const btnPause=document.getElementById("btnPause");
+const titleHighScore=document.getElementById("titleHighScore");
+const characterSprite=new Image();characterSprite.src="https://sdk.bitmoji.com/me/sticker/x9YP40td1zJHcC64oQ4htyATyVeig0bGqzyNqTVZDdcLWVJHRfxSeg/10207747.png?p=dD1zO2w9ZW4.v1&size=thumbnail";
+const flagSprite=new Image();flagSprite.src="https://pngimg.com/d/flags_PNG14697.png";
+const coinSprite=new Image();coinSprite.src="https://pngimg.com/d/coin_PNG36871.png";
+const fireballSprite=new Image();fireballSprite.src="";
+const AudioCtx=window.AudioContext||window.webkitAudioContext;let audioCtx=null;
+function ensureAudio(){if(!audioCtx)try{audioCtx=new AudioCtx()}catch(e){audioCtx=null}}
+function playBeep(freq=440,type="sine",duration=0.08,volume=0.08){if(!audioCtx)return;try{const o=audioCtx.createOscillator();const g=audioCtx.createGain();o.type=type;o.frequency.value=freq;g.gain.value=volume;o.connect(g);g.connect(audioCtx.destination);o.start();o.stop(audioCtx.currentTime+duration)}catch(e){}}
+function playCoin(){playBeep(1200,"square",0.06,0.06)}
+function playJump(){playBeep(780,"sine",0.06,0.08)}
+function playPowerup(){playBeep(620,"sawtooth",0.12,0.09)}
+function playHit(){playBeep(220,"sine",0.12,0.12)}
+function playWin(){playBeep(880,"triangle",0.22,0.12)}
+const TICKS_PER_SECOND=60;
+const DEFAULT_LEVEL_SECONDS=180;
+const highScoreKey="big_platformer_highscore_v3";
+let cameraX=0;let levelIndex=0;let levels=[];let gameOver=false;let gameWon=false;let coinsCollected=0;let score=0;let lives=5;
+let levelTimer=0;let showTitle=true;let paused=false;
+const player={x:60,y:0,width:36,height:48,speed:4.4,jumpPower:15,gravity:0.9,vy:0,jumping:false,invincible:false,invincibleTimer:0,hasFire:false,hasIce:false,hasDoubleJump:false,fireCooldown:0,facing:1,respawnX:80,respawnY:0,canDoubleJump:true,shield:false,shieldTimer:0};
+const keys={left:false,right:false,up:false,shoot:false,pause:false};
+const touchState={left:false,right:false,up:false,shoot:false,pause:false};
+document.addEventListener("keydown",(e)=>{if(e.code==="ArrowLeft"||e.key==="a"){keys.left=true;player.facing=-1}if(e.code==="ArrowRight"||e.key==="d"){keys.right=true;player.facing=1}if(e.code==="ArrowUp"||e.key==="Space"||e.key==="w"){if(!player.jumping){player.vy=-player.jumpPower;player.jumping=true;playJump()}else if(player.hasDoubleJump&&player.canDoubleJump){player.vy=-player.jumpPower*0.9;player.canDoubleJump=false;playBeep(900,"sine",0.06,0.06)}}if(e.code==="KeyK"){keys.shoot=true}if(e.code==="KeyP"){paused=!paused}if(e.code==="Escape"){showTitle=true;paused=false}});
+document.addEventListener("keyup",(e)=>{if(e.code==="ArrowLeft"||e.key==="a")keys.left=false; if(e.code==="ArrowRight"||e.key==="d")keys.right=false; if(e.code==="KeyK")keys.shoot=false});
+function bind(el,prop){if(!el)return;el.addEventListener("touchstart",(ev)=>{ev.preventDefault();touchState[prop]=true},{passive:false});el.addEventListener("touchend",(ev)=>{ev.preventDefault();touchState[prop]=false},{passive:false});el.addEventListener("mousedown",()=>{touchState[prop]=true});el.addEventListener("mouseup",()=>{touchState[prop]=false});el.addEventListener("mouseleave",()=>{touchState[prop]=false})}
+bind(btnLeft,"left");bind(btnRight,"right");bind(btnUp,"up");bind(btnShoot,"shoot");bind(btnPause,"pause");
+function applyTouchToKeys(){if(touchState.left){keys.left=true;player.facing=-1}else if(!keys.left)keys.left=false; if(touchState.right){keys.right=true;player.facing=1}else if(!keys.right)keys.right=false; if(touchState.up&& !player.jumping){player.jumping=true;player.vy=-player.jumpPower;playJump()} if(touchState.shoot)keys.shoot=true; else if(!keys.shoot)keys.shoot=false}
+function rectsOverlap(a,b){return a&&b&&(a.x<b.x+b.width&&a.x+a.width>b.x&&a.y<b.y+b.height&&a.y+a.height> b.y)}
+let bgLayers=[];
+function initBackground(){bgLayers=[{name:"sky",speed:0,draw:()=>{}},{name:"clouds",speed:0.12,clouds:makeClouds(14),draw(offset){ctx.globalAlpha=0.9;ctx.fillStyle="#fff";this.clouds.forEach(c=>drawCloud((c.x-offset*this.speed)%(canvas.width*2)-120,c.y,c.scale));ctx.globalAlpha=1}},{name:"mountains",speed:0.36,draw(offset){ctx.fillStyle="#6b8e23";for(let i=-2;i<8;i++){const mx=i*400+(-offset*this.speed%400);ctx.beginPath();ctx.moveTo(mx,canvas.height);ctx.lineTo(mx+200,canvas.height-180);ctx.lineTo(mx+400,canvas.height);ctx.closePath();ctx.fill()}}},{name:"trees",speed:0.65,draw(offset){ctx.fillStyle="#2f4f2f";for(let i=-2;i<12;i++){const tx=i*160+(-offset*this.speed%160);ctx.fillRect(tx+20,canvas.height-220,20,80);ctx.beginPath();ctx.ellipse(tx+30,canvas.height-240,48,32,0,0,Math.PI*2);ctx.fill()}}}]}
+function makeClouds(n){const arr=[];for(let i=0;i<n;i++){arr.push({x:Math.random()*(canvas.width*2),y:30+Math.random()*160,scale:0.6+Math.random()*1.4})}return arr}
+function drawCloud(x,y,scale=1){ctx.save();ctx.translate(x,y);ctx.beginPath();ctx.ellipse(20*scale,12*scale,26*scale,14*scale,0,0,Math.PI*2);ctx.ellipse(48*scale,6*scale,28*scale,16*scale,0,0,Math.PI*2);ctx.ellipse(76*scale,14*scale,24*scale,12*scale,0,0,Math.PI*2);ctx.fill();ctx.restore()}
+function rand(min,max){return Math.random()*(max-min)+min}
+function createLevels(){levels=[];const mobileScale=Math.min(1,canvas.width/900);for(let li=0;li<25;li++){const difficulty=li+1;const levelWidth=Math.round((2200+li*400)*(1-(1-mobileScale)*0.18));const groundY=Math.round(canvas.height*0.45);const stairs=[];const stairClusters=2+Math.floor(difficulty*0.55);for(let s=0;s<stairClusters;s++){const baseX=300+(s*(levelWidth-600))/stairClusters;const steps=4+Math.floor(difficulty/3);for(let step=0;step<steps;step++){stairs.push({x:baseX+step*36,y:groundY-(step+1)*28,width:36,height:28})}}const pits=[];const pitCount=Math.floor(difficulty/3);for(let p=0;p<pitCount;p++){const px=800+p*350+Math.random()*140;const width=60+difficulty*12;pits.push({x:px,y:groundY,width,height,depth:canvas.height-groundY})}const goombas=[];const gCount=Math.max(1,1+Math.floor(difficulty*1.5)-(canvas.width<600?1:0));for(let g=0;g<gCount;g++){const gx=400+g*200+Math.random()*120;const speed=0.7+difficulty*0.18;goombas.push({x:gx,y:groundY-28,width:28,height:28,speed,dir:Math.random()>0.5?1:-1,minX:gx-60,maxX:gx+60,dead:false,animTimer:Math.floor(Math.random()*30)})}const spikes=[];const spikeCount=Math.min(2+difficulty,12);for(let sp=0;sp<spikeCount;sp++){const sx=600+sp*220+Math.random()*90;spikes.push({x:sx,y:groundY-12,width:28,height:12})}const coins=[];const coinCount=Math.max(12,18+difficulty*5-(canvas.width<600?8:0));for(let c=0;c<coinCount;c++){const cx=160+c*(Math.max(60,Math.floor(levelWidth/coinCount)))+Math.random()*40;const cy=groundY-60-Math.random()*140;coins.push({x:cx,y:cy,width:20,height:20,collected:false,anim:Math.random()*8})}const powerUps=[];if(difficulty>=2){const tx=600+difficulty*110+Math.random()*140;const ttype=Math.random()<0.25?"fire":(Math.random()<0.35?"ice":(Math.random()<0.5?"double":"life"));powerUps.push({type:ttype,x:tx,y:groundY-40,width:28,height:28,taken:false})}const mysteryBoxes=[];const boxCount=2+Math.floor(difficulty/3);for(let b=0;b<boxCount;b++){const bx=420+b*420+Math.random()*180;const by=groundY-120-Math.random()*80;mysteryBoxes.push({x:bx,y:by,width:28,height:28,used:false,reward:Math.random()<0.45?"coin":(Math.random()<0.65?"life":(Math.random()<0.8?"star":"shield"))})}const flag={x:levelWidth-120,y:groundY-90,width:28,height:56};const cannons=[];const cannonCount=Math.floor(difficulty/3);for(let c=0;c<cannonCount;c++){const cx=520+c*600+Math.random()*260;cannons.push({x:cx,y:groundY-28,width:28,height:28,dir:Math.random()>0.5?-1:1,cooldown:90+Math.floor(Math.random()*140),timer:Math.floor(Math.random()*60)})}const bats=[];const batCount=Math.max(0,Math.floor(difficulty*1.05)-(canvas.width<600?1:0));for(let b=0;b<batCount;b++){const bx=300+Math.random()*(levelWidth-600);const baseY=groundY-140-Math.random()*120;bats.push({x:bx,y:baseY,baseY,width:36,height:22,speed:1.0+difficulty*0.08,dir:Math.random()>0.5?1:-1,amplitude:30+Math.random()*60,freq:0.02+Math.random()*0.03,dead:false,anim:Math.random()*4})}const shells=[];const shellCount=Math.floor(difficulty/4);for(let sh=0;sh<shellCount;sh++){const sx=500+sh*600+Math.random()*240;shells.push({x:sx,y:groundY-28,width:30,height:24,state:"walk",vx:Math.random()>0.5?1:-1,alive:true})}const ghosts=[];const ghostCount=Math.floor((difficulty-6)/3);for(let gh=0;gh<Math.max(0,ghostCount);gh++){const gx=600+gh*500+Math.random()*300;const gy=groundY-200-Math.random()*140;ghosts.push({x:gx,y:gy,width:36,height:44,phase:Math.random()*Math.PI*2,visible:true,dir:Math.random()>0.5?1:-1})}const movingPlatforms=[];const mpCount=Math.min(6,Math.floor(difficulty/2));for(let m=0;m<mpCount;m++){const mx=400+m*420+Math.random()*200;const my=groundY-150-Math.random()*140;movingPlatforms.push({x:mx,y:my,width:120,height:16,range:160+Math.random()*180,dir:Math.random()>0.5?1:-1,speed:1+Math.random()*1.4})}const springs=[];const springCount=Math.floor(difficulty/4);for(let sp=0;sp<springCount;sp++){const sx=700+sp*500+Math.random()*220;springs.push({x:sx,y:groundY-12,width:28,height:12})}const waterPools=[];const waterCount=Math.floor((difficulty-1)/5);for(let w=0;w<waterCount;w++){const wx=900+w*800+Math.random()*240;waterPools.push({x:wx,y:groundY+20,width:160+Math.random()*180,height:60})}const items=[];const lockedDoors=[];if(Math.random()<0.3){const keyX=600+Math.random()*800;items.push({type:"key",x:keyX,y:groundY-80,width:20,height:28,collected:false});lockedDoors.push({x:keyX+400,y:groundY-90,width:40,height:90,locked:true})}const checkpoints=[];const cpCount=Math.min(4,Math.max(1,Math.floor(levelWidth/1400)));for(let cp=0;cp<cpCount;cp++){const cx=200+(cp*(levelWidth-400))/(cpCount-0.0001);checkpoints.push({x:cx,y:groundY-120,width:20,height:80,active:false})}const particles=[];const levelSeconds=Math.max(DEFAULT_LEVEL_SECONDS-Math.floor(difficulty*6),50);levels.push({width:levelWidth,groundY,stairs,pits,goombas,spikes,coins,powerUps,mysteryBoxes,flag,cannons,bats,shells,ghosts,movingPlatforms,springs,waterPools,items,lockedDoors,checkpoints,particles,levelSeconds})}}
+const fireballs=[];
+function spawnPlayerFire(x,y,dir,type="fire"){fireballs.push({x,y,vx:6*dir,vy:-1.5,width:12,height:12,life:120,friendly:true,type});playBeep(880,"sine",0.08,0.06)}
+function spawnEnemyFire(x,y,vx,vy){fireballs.push({x,y,vx,vy,width:12,height:12,life:200,friendly:false})}
+function spawnParticles(L,x,y,color="orange",count=8,speed=2){for(let i=0;i<count;i++){L.particles.push({x:x+Math.random()*8-4,y:y+Math.random()*8-4,vx:(Math.random()-0.5)*speed,vy:(Math.random()-0.5)*speed-1,life:30+Math.floor(Math.random()*40),color})}}
+function damagePlayer(ignoreCheckpoint=false){if(player.invincible)return;playHit();lives--;player.invincible=true;player.invincibleTimer=120; if(lives<=0){gameOver=true;saveHighScore()}else{const rx=ignoreCheckpoint?80:(player.respawnX||80);const ry=ignoreCheckpoint?levels[levelIndex].groundY-player.height:(player.respawnY||levels[levelIndex].groundY-player.height);player.x=rx;player.y=ry;player.vy=0;player.jumping=false}}
+function saveHighScore(){try{const prev=parseInt(localStorage.getItem(highScoreKey)||"0",10);if(score>prev)localStorage.setItem(highScoreKey,String(score))}catch(e){}}
+function getHighScore(){try{return parseInt(localStorage.getItem(highScoreKey)||"0",10)}catch(e){return 0}}
+function update(){if(showTitle||paused)return; if(gameOver||gameWon)return; const L=levels[levelIndex]; applyTouchToKeys(); if(keys.left){player.x-=player.speed;player.facing=-1} if(keys.right){player.x+=player.speed;player.facing=1} player.x=Math.max(0,Math.min(L.width-player.width,player.x)); player.y+=player.vy; player.vy+=player.gravity; const onPit=L.pits&&L.pits.some(pit=>player.x+player.width>pit.x&&player.x<pit.x+pit.width&&player.y+player.height>=pit.y); if(!onPit&&player.y+player.height>=L.groundY){player.y=L.groundY-player.height;player.vy=0;player.jumping=false;player.canDoubleJump=true} L.stairs.forEach(st=>{if(rectsOverlap(player,st)&&player.vy>=0){player.y=st.y-player.height;player.vy=0;player.jumping=false;player.canDoubleJump=true}}); L.goombas.forEach(g=>{if(g.dead)return;g.x+=g.speed*g.dir; if(g.x<g.minX)g.dir=1; if(g.x+g.width>g.maxX)g.dir=-1; g.animTimer=(g.animTimer+1)%30; if(rectsOverlap(player,g)){ if(player.invincible){g.dead=true;score+=100;spawnParticles(L,g.x+g.width/2,g.y+g.height/2,"brown",12)} else if(player.vy>0&&player.y+player.height-g.y<18){g.dead=true;player.vy=-player.jumpPower*0.6;score+=100;playBeep(740,"square",0.06,0.08)} else damagePlayer()}}); L.bats.forEach(b=>{if(b.dead)return;b.x+=b.speed*b.dir;b.y=b.baseY+Math.sin(performance.now()*b.freq+b.x)*b.amplitude*0.5; if(b.x<0)b.dir=1; if(b.x>L.width)b.dir=-1; b.anim=(b.anim+0.2)%4; if(rectsOverlap(player,b)){ if(player.invincible){b.dead=true;score+=120;spawnParticles(L,b.x,b.y,"gray",10)} else damagePlayer()}}); L.cannons.forEach(c=>{c.timer++; if(c.timer>=c.cooldown){c.timer=0; const dx=(player.x+player.width/2)-(c.x+c.width/2); const dy=(player.y+player.height/2)-(c.y+c.height/2)-20; const dist=Math.sqrt(dx*dx+dy*dy)||1; const vx=(dx/dist)*(3+Math.random()*1.5); const vy=(dy/dist)*(3+Math.random()*1.0); spawnEnemyFire(c.x,c.y-8,vx,vy)}}); L.spikes.forEach(sp=>{if(!player.invincible&&rectsOverlap(player,sp))damagePlayer()}); L.coins.forEach(c=>{if(!c.collected&&rectsOverlap(player,c)){c.collected=true;coinsCollected++;score+=10;playCoin();spawnParticles(L,c.x+8,c.y+8,"gold",6,1.6)} if(!c.collected)c.anim=(c.anim+0.2)%8}); L.powerUps.forEach(p=>{if(!p.taken&&rectsOverlap(player,p)){p.taken=true; if(p.type==="life"){lives++;playPowerup()} else if(p.type==="star"){player.invincible=true;player.invincibleTimer=600;playPowerup()} else if(p.type==="fire"){player.hasFire=true;playPowerup()} else if(p.type==="ice"){player.hasIce=true;playPowerup()} else if(p.type==="double"){player.hasDoubleJump=true;player.canDoubleJump=true;playPowerup()}}}); L.mysteryBoxes.forEach(b=>{if(!b.used&&rectsOverlap(player,b)&&player.vy<0){b.used=true; if(b.reward==="coin"){coinsCollected++;score+=10;playCoin()} else if(b.reward==="life"){lives++;playPowerup()} else if(b.reward==="star"){player.invincible=true;player.invincibleTimer=600;playPowerup()} else if(b.reward==="shield"){player.shield=true;player.shieldTimer=600;playPowerup()}}}); L.checkpoints.forEach(cp=>{if(!cp.active&&rectsOverlap(player,cp)){cp.active=true;player.respawnX=cp.x+10;player.respawnY=cp.y+cp.height-player.height;playBeep(1000,"sine",0.08,0.07)}}); if(player.invincibleTimer>0){player.invincibleTimer--; if(player.invincibleTimer===0)player.invincible=false} if(player.shield){player.shieldTimer--; if(player.shieldTimer<=0)player.shield=false} if(player.hasFire&&player.fireCooldown>0)player.fireCooldown--; if(keys.shoot&&player.hasFire&&player.fireCooldown<=0){const sx=player.x+(player.facing===1?player.width:-12);const sy=player.y+player.height/2;spawnPlayerFire(sx,sy,player.facing,"fire");player.fireCooldown=18} if(keys.shoot&&player.hasIce&&player.fireCooldown<=0){const sx=player.x+(player.facing===1?player.width:-12);const sy=player.y+player.height/2;spawnPlayerFire(sx,sy,player.facing,"ice");player.fireCooldown=28} for(let i=fireballs.length-1;i>=0;i--){const f=fireballs[i];f.x+=f.vx;f.y+=f.vy;f.vy+=0.12;f.life--; if(f.x<0||f.x>L.width||f.y>canvas.height+200||f.life<=0){fireballs.splice(i,1);continue} let removed=false; if(f.friendly){L.goombas.forEach(g=>{if(!g.dead&&rectsOverlap(f,g)){g.dead=true;score+=80;spawnParticles(L,g.x+8,g.y+8,"brown",10);removed=true}}); L.bats.forEach(b=>{if(!b.dead&&rectsOverlap(f,b)){b.dead=true;score+=120;spawnParticles(L,b.x,b.y,"gray",8);removed=true}}); L.cannons.forEach(c=>{if(rectsOverlap(f,c)){c.timer=Math.max(0,c.timer-40);removed=true}}); L.shells&&L.shells.forEach(s=>{if(s.alive&&rectsOverlap(f,s)){s.alive=false;removed=true}}); if(removed){fireballs.splice(i,1);playBeep(640,"square",0.06,0.06);continue}}else{if(!player.invincible&&!player.shield&&rectsOverlap(f,player)){fireballs.splice(i,1);damagePlayer();continue}} } for(let i=L.particles.length-1;i>=0;i--){const p=L.particles[i];p.x+=p.vx;p.y+=p.vy;p.vy+=0.12;p.life--; if(p.life<=0)L.particles.splice(i,1)} L.shells&&L.shells.forEach(s=>{if(!s.alive)return; if(s.state==="walk"){s.x+=s.vx; if(Math.random()<0.003)s.vx*=-1} if(rectsOverlap(player,s)){ if(player.vy>0&&player.y+player.height-s.y<18){s.alive=false;player.vy=-player.jumpPower*0.6;score+=140}else damagePlayer()}}); L.movingPlatforms&&L.movingPlatforms.forEach(m=>{m.x+=m.dir*m.speed; if(m.x<m.startX-m.range/2||m.x>m.startX+m.range/2)m.dir*=-1}); L.springs&&L.springs.forEach(sp=>{if(rectsOverlap(player,sp)&&player.vy>=0){player.vy=-player.jumpPower*1.4;playBeep(1200,"sine",0.06,0.06)}}); L.items&&L.items.forEach(it=>{if(!it.collected&&rectsOverlap(player,it)){it.collected=true;if(it.type==="key"){score+=50;playBeep(1400,"sine",0.06,0.06)}}}); L.lockedDoors&&L.lockedDoors.forEach(d=>{if(d.locked&&levels[levelIndex].items&&levels[levelIndex].items.some(it=>it.type==="key"&&it.collected)){d.locked=false;score+=80}}); if(rectsOverlap(player,L.flag)){if(levelIndex<levels.length-1){playWin();resetToLevel(levelIndex+1);return}else{gameWon=true;saveHighScore();playWin();return}} if(player.y>canvas.height+150)damagePlayer(); cameraX=Math.max(0,Math.min(player.x-canvas.width*0.3,L.width-canvas.width)); levelTimer--; if(levelTimer<=0)damagePlayer(true)}
+function draw(){const grad=ctx.createLinearGradient(0,0,0,canvas.height);grad.addColorStop(0,"#87ceeb");grad.addColorStop(1,"#a0d6ff");ctx.fillStyle=grad;ctx.fillRect(0,0,canvas.width,canvas.height);const L=levels[levelIndex];bgLayers.forEach(layer=>{ctx.save();ctx.translate(-cameraX*(layer.speed||0),0);layer.draw(cameraX);ctx.restore()});ctx.save();ctx.translate(-cameraX,0);ctx.fillStyle="#b5651d";ctx.fillRect(0,L.groundY,L.width,canvas.height-L.groundY);ctx.fillStyle="#4d2b00";L.pits.forEach(p=>ctx.fillRect(p.x,p.y,p.width,p.height));L.stairs.forEach(st=>{ctx.fillStyle="#a0522d";ctx.fillRect(st.x,st.y,st.width,st.height);ctx.fillStyle="#654321";ctx.fillRect(st.x+st.width/2-3,st.y+st.height,6,L.groundY-(st.y+st.height))});ctx.fillStyle="black";L.spikes.forEach(sp=>{ctx.beginPath();ctx.moveTo(sp.x,sp.y+sp.height);ctx.lineTo(sp.x+sp.width/2,sp.y);ctx.lineTo(sp.x+sp.width,sp.y+sp.height);ctx.fill()});L.coins.forEach(c=>{if(!c.collected){if(coinSprite.complete&&coinSprite.naturalWidth!==0){const wob=Math.sin(c.anim*0.5)*4;ctx.drawImage(coinSprite,c.x,c.y+wob,c.width,c.height)}else{ctx.beginPath();ctx.fillStyle="gold";ctx.arc(c.x+c.width/2,c.y+c.height/2,c.width/2,0,Math.PI*2);ctx.fill()}}});L.powerUps.forEach(p=>{if(!p.taken){if(p.type==="life"){ctx.fillStyle="red";ctx.fillRect(p.x,p.y,p.width,p.height);ctx.fillStyle="white";ctx.font="14px Arial";ctx.fillText("+",p.x+6,p.y+18)}else if(p.type==="star"){ctx.fillStyle="yellow";ctx.beginPath();ctx.arc(p.x+p.width/2,p.y+p.height/2,p.width/2,0,Math.PI*2);ctx.fill()}else if(p.type==="fire"){ctx.fillStyle="orange";ctx.fillRect(p.x,p.y,p.width,p.height);ctx.fillStyle="white";ctx.font="12px Arial";ctx.fillText("F",p.x+6,p.y+18)}else if(p.type==="ice"){ctx.fillStyle="#aaf";ctx.fillRect(p.x,p.y,p.width,p.height);ctx.fillStyle="white";ctx.font="12px Arial";ctx.fillText("I",p.x+6,p.y+18)}else if(p.type==="double"){ctx.fillStyle="#6cf";ctx.fillRect(p.x,p.y,p.width,p.height);ctx.fillStyle="white";ctx.font="12px Arial";ctx.fillText("2",p.x+6,p.y+18)}}});L.mysteryBoxes.forEach(b=>{if(!b.used){ctx.fillStyle="orange";ctx.fillRect(b.x,b.y,b.width,b.height);ctx.fillStyle="black";ctx.font="20px Arial";ctx.fillText("?",b.x+6,b.y+22)}else{ctx.fillStyle="#8b4513";ctx.fillRect(b.x,b.y,b.width,b.height)}});ctx.fillStyle="sienna";L.goombas.forEach(g=>{if(!g.dead){const bob=Math.sin(g.animTimer*0.2)*2;ctx.fillRect(g.x,g.y+bob,g.width,g.height)}else{ctx.fillStyle="#3a2b1b";ctx.fillRect(g.x,g.y+14,g.width,6);ctx.fillStyle="sienna"}});L.bats.forEach(b=>{if(!b.dead){ctx.save();ctx.translate(b.x+b.width/2,b.y+b.height/2);ctx.scale(b.dir,1);ctx.fillStyle="gray";ctx.beginPath();ctx.moveTo(-b.width/2,0);ctx.quadraticCurveTo(-b.width/2-10,-10-Math.sin(b.anim)*6,-b.width,-10);ctx.quadraticCurveTo(-b.width/2,-6,-b.width/2+10,-2);ctx.closePath();ctx.fill();ctx.restore()}else{ctx.fillStyle="rgba(120,120,120,0.6)";ctx.fillRect(b.x,b.y,b.width,4)}});L.cannons.forEach(c=>{ctx.fillStyle="#222";ctx.fillRect(c.x,c.y-8,c.width,c.height+8);ctx.fillStyle="#444";ctx.fillRect(c.x+(c.dir===1?c.width-6:0),c.y-12,6,6)});L.checkpoints.forEach(cp=>{ctx.fillStyle=cp.active?"yellow":"white";ctx.fillRect(cp.x,cp.y,6,cp.height);ctx.fillStyle=cp.active?"orange":"red";ctx.fillRect(cp.x+6,cp.y+12,18,12)});if(flagSprite.complete&&flagSprite.naturalWidth!==0)ctx.drawImage(flagSprite,L.flag.x,L.flag.y,L.flag.width,L.flag.height);else{ctx.fillStyle="red";ctx.fillRect(L.flag.x,L.flag.y,L.flag.width,L.flag.height)};fireballs.forEach(f=>{if(fireballSprite.complete&&fireballSprite.naturalWidth!==0)ctx.drawImage(fireballSprite,f.x,f.y,f.width,f.height);else{ctx.beginPath();ctx.fillStyle=f.friendly?"orange":"red";ctx.arc(f.x+f.width/2,f.y+f.height/2,f.width/2,0,Math.PI*2);ctx.fill()}});L.particles.forEach(p=>{ctx.globalAlpha=Math.max(0,Math.min(1,p.life/60));ctx.fillStyle=p.color||"orange";ctx.fillRect(p.x,p.y,3,3);ctx.globalAlpha=1});if(characterSprite.complete&&characterSprite.naturalWidth!==0){if(!(player.invincible&&Math.floor(performance.now()/120)%2===0)){ctx.drawImage(characterSprite,player.x,player.y,player.width,player.height)}}else{ctx.fillStyle="blue";ctx.fillRect(player.x,player.y,player.width,player.height)};ctx.restore();const small=canvas.width<600;ctx.fillStyle="black";ctx.font=small?"14px Arial":"18px Arial";ctx.fillText(`Lvl ${levelIndex+1}/${levels.length}`,12,24);ctx.fillText(`Coins: ${coinsCollected}`,12,24+(small?20:26));ctx.fillText(`Score: ${score}`,12,24+(small?40:52));ctx.fillText(`Lives: ${lives}`,12,24+(small?60:78));if(player.invincible)ctx.fillText("Invincible!",12,24+(small?80:104));if(player.hasFire)ctx.fillText("Fire: Ready",canvas.width-130,24);const secondsLeft=Math.max(0,Math.floor(levelTimer/TICKS_PER_SECOND));ctx.fillStyle="black";ctx.font=small?"14px Arial":"16px Arial";ctx.fillText(`Time: ${secondsLeft}s`,canvas.width-(small?110:140),24);ctx.fillStyle="rgba(0,0,0,0.5)";ctx.fillRect(canvas.width-220,34,200,38);ctx.fillStyle="white";ctx.font="14px Arial";ctx.fillText(`High: ${getHighScore()}`,canvas.width-200,58);if(paused){ctx.fillStyle="rgba(0,0,0,0.5)";ctx.fillRect(0,0,canvas.width,canvas.height);ctx.fillStyle="white";ctx.font="46px Arial";ctx.fillText("PAUSED",canvas.width/2-100,canvas.height/2)}if(gameOver){ctx.fillStyle="rgba(0,0,0,0.6)";ctx.fillRect(0,canvas.height/2-60,canvas.width,140);ctx.fillStyle="white";ctx.font="48px Arial";ctx.fillText("GAME OVER",canvas.width/2-160,canvas.height/2);ctx.font="20px Arial";ctx.fillText("Tap the screen to restart (or use buttons)",canvas.width/2-160,canvas.height/2+40)}else if(gameWon){ctx.fillStyle="rgba(0,0,0,0.6)";ctx.fillRect(0,canvas.height/2-60,canvas.width,140);ctx.fillStyle="white";ctx.font="42px Arial";ctx.fillText("YOU WIN!",canvas.width/2-100,canvas.height/2);ctx.font="20px Arial";ctx.fillText(`Final Score: ${score}`,canvas.width/2-70,canvas.height/2+40)}ctx.font="12px Arial";ctx.fillStyle="rgba(0,0,0,0.6)";ctx.fillText("Controls: use on-screen buttons or arrow keys/A-D (desktop).",12,canvas.height-12);hudSmall.innerHTML=`Lvl:${levelIndex+1} • Coins:${coinsCollected} • Score:${score} • Lives:${lives} • Time:${secondsLeft}s`}
+let lastTime=performance.now();
+function gameLoop(now=performance.now()){const dt=now-lastTime;lastTime=now;if(!audioCtx&&!showTitle)ensureAudio();for(let i=0;i<1;i++)update();draw();if(!gameOver&&!gameWon&&!showTitle)requestAnimationFrame(gameLoop);else if(showTitle){bgLayers.forEach(layer=>{if(layer.name==="clouds")layer.clouds.forEach(c=>{c.x+=0.02})});requestAnimationFrame(gameLoop)}}
+function showTitleOverlay(show=true){showTitle=show;if(show){titleOverlay.classList.remove("hidden");titleHighScore.innerText=`High Score: ${getHighScore()}`}else{titleOverlay.classList.add("hidden")}}titleOverlay.addEventListener("click",e=>{ensureAudio();showTitleOverlay(false);lastTime=performance.now();requestAnimationFrame(gameLoop)})
+canvas.addEventListener("click",()=>{if(!gameOver&&!gameWon)return; if(gameOver){if(lives>0)resetToLevel(levelIndex);else resetToLevel(0);showTitleOverlay(false);lastTime=performance.now();requestAnimationFrame(gameLoop)}else if(gameWon){resetToLevel(0);showTitleOverlay(false);lastTime=performance.now();requestAnimationFrame(gameLoop)}})
+document.addEventListener("keydown",(e)=>{if(e.code==="Enter"&&(gameOver||gameWon)){if(lives>0)resetToLevel(levelIndex);else resetToLevel(0);showTitleOverlay(false);lastTime=performance.now();requestAnimationFrame(gameLoop)}})
+window.__BIGGAME={addCoins(n=10){coinsCollected+=n;score+=n*10},nextLevel(){resetToLevel(Math.min(levelIndex+1,levels.length-1))},giveLife(){lives++},setTime(s){levelTimer=s*TICKS_PER_SECOND},toggleInvincible(){player.invincible=!player.invincible},teleport(x){player.x=x;cameraX=Math.max(0,Math.min(player.x-canvas.width*0.3,levels[levelIndex].width-canvas.width))}}
+let assetsLoaded=0;function assetReady(){assetsLoaded++;if(assetsLoaded>=3){initBackground();createLevels();resetToLevel(0);lastTime=performance.now();showTitleOverlay(true);requestAnimationFrame(gameLoop)}}characterSprite.onload=assetReady;flagSprite.onload=assetReady;coinSprite.onload=assetReady;setTimeout(()=>{if(assetsLoaded<3){initBackground();createLevels();resetToLevel(0);lastTime=performance.now();showTitleOverlay(true);requestAnimationFrame(gameLoop)}},2500)
+function resetToLevel(idx){if(idx===0){lives=5;coinsCollected=0;score=0}levelIndex=idx;const L=levels[levelIndex];player.x=80;player.y=L.groundY-player.height;player.respawnX=player.x;player.respawnY=player.y;player.vy=0;player.jumping=false;player.invincible=false;player.invincibleTimer=0;player.hasFire=false;player.hasIce=false;player.hasDoubleJump=false;player.fireCooldown=0;player.shield=false;player.shieldTimer=0;cameraX=0;gameOver=false;gameWon=false;paused=false;L.coins.forEach(c=>c.collected=false);L.goombas.forEach(g=>g.dead=false);L.powerUps.forEach(p=>p.taken=false);L.mysteryBoxes.forEach(b=>b.used=false);L.cannons.forEach(c=>c.timer=Math.floor(Math.random()*c.cooldown));L.bats.forEach(b=>b.dead=false);L.shells&&L.shells.forEach(s=>s.alive=true);L.ghosts&&L.ghosts.forEach(g=>g.visible=true);L.checkpoints.forEach(c=>c.active=false);L.particles.length=0;L.movingPlatforms&&L.movingPlatforms.forEach(m=>{m.startX=m.x});levelTimer=L.levelSeconds*TICKS_PER_SECOND}
+
+function padFunctor0(){return 0;}
+function padFunctor1(){return 1;}
+function padFunctor2(){return 2;}
+function padFunctor3(){return 3;}
+function padFunctor4(){return 4;}
+function padFunctor5(){return 5;}
+function padFunctor6(){return 6;}
+function padFunctor7(){return 7;}
+function padFunctor8(){return 8;}
+function padFunctor9(){return 9;}
+function padFunctor10(){return 10;}
+function padFunctor11(){return 11;}
+function padFunctor12(){return 12;}
+function padFunctor13(){return 13;}
+function padFunctor14(){return 14;}
+function padFunctor15(){return 15;}
+function padFunctor16(){return 16;}
+function padFunctor17(){return 17;}
+function padFunctor18(){return 18;}
+function padFunctor19(){return 19;}
+function padFunctor20(){return 20;}
+function padFunctor21(){return 21;}
+function padFunctor22(){return 22;}
+function padFunctor23(){return 23;}
+function padFunctor24(){return 24;}
+function padFunctor25(){return 25;}
+function padFunctor26(){return 26;}
+function padFunctor27(){return 27;}
+function padFunctor28(){return 28;}
+function padFunctor29(){return 29;}
+function padFunctor30(){return 30;}
+function padFunctor31(){return 31;}
+function padFunctor32(){return 32;}
+function padFunctor33(){return 33;}
+function padFunctor34(){return 34;}
+function padFunctor35(){return 35;}
+function padFunctor36(){return 36;}
+function padFunctor37(){return 37;}
+function padFunctor38(){return 38;}
+function padFunctor39(){return 39;}
+function padFunctor40(){return 40;}
+function padFunctor41(){return 41;}
+function padFunctor42(){return 42;}
+function padFunctor43(){return 43;}
+function padFunctor44(){return 44;}
+function padFunctor45(){return 45;}
+function padFunctor46(){return 46;}
+function padFunctor47(){return 47;}
+function padFunctor48(){return 48;}
+function padFunctor49(){return 49;}
+function padFunctor50(){return 50;}
+function padFunctor51(){return 51;}
+function padFunctor52(){return 52;}
+function padFunctor53(){return 53;}
+function padFunctor54(){return 54;}
+function padFunctor55(){return 55;}
+function padFunctor56(){return 56;}
+function padFunctor57(){return 57;}
+function padFunctor58(){return 58;}
+function padFunctor59(){return 59;}
+function padFunctor60(){return 60;}
+function padFunctor61(){return 61;}
+function padFunctor62(){return 62;}
+function padFunctor63(){return 63;}
+function padFunctor64(){return 64;}
+function padFunctor65(){return 65;}
+function padFunctor66(){return 66;}
+function padFunctor67(){return 67;}
+function padFunctor68(){return 68;}
+function padFunctor69(){return 69;}
+function padFunctor70(){return 70;}
+function padFunctor71(){return 71;}
+function padFunctor72(){return 72;}
+function padFunctor73(){return 73;}
+function padFunctor74(){return 74;}
+function padFunctor75(){return 75;}
+function padFunctor76(){return 76;}
+function padFunctor77(){return 77;}
+function padFunctor78(){return 78;}
+function padFunctor79(){return 79;}
+function padFunctor80(){return 80;}
+function padFunctor81(){return 81;}
+function padFunctor82(){return 82;}
+function padFunctor83(){return 83;}
+function padFunctor84(){return 84;}
+function padFunctor85(){return 85;}
+function padFunctor86(){return 86;}
+function padFunctor87(){return 87;}
+function padFunctor88(){return 88;}
+function padFunctor89(){return 89;}
+function padFunctor90(){return 90;}
+function padFunctor91(){return 91;}
+function padFunctor92(){return 92;}
+function padFunctor93(){return 93;}
+function padFunctor94(){return 94;}
+function padFunctor95(){return 95;}
+function padFunctor96(){return 96;}
+function padFunctor97(){return 97;}
+function padFunctor98(){return 98;}
+function padFunctor99(){return 99;}
+function padFunctor100(){return 100;}
+function padFunctor101(){return 101;}
+function padFunctor102(){return 102;}
+function padFunctor103(){return 103;}
+function padFunctor104(){return 104;}
+function padFunctor105(){return 105;}
+function padFunctor106(){return 106;}
+function padFunctor107(){return 107;}
+function padFunctor108(){return 108;}
+function padFunctor109(){return 109;}
+function padFunctor110(){return 110;}
+function padFunctor111(){return 111;}
+function padFunctor112(){return 112;}
+function padFunctor113(){return 113;}
+function padFunctor114(){return 114;}
+function padFunctor115(){return 115;}
+function padFunctor116(){return 116;}
+function padFunctor117(){return 117;}
+function padFunctor118(){return 118;}
+function padFunctor119(){return 119;}
+function padFunctor120(){return 120;}
+function padFunctor121(){return 121;}
+function padFunctor122(){return 122;}
+function padFunctor123(){return 123;}
+function padFunctor124(){return 124;}
+function padFunctor125(){return 125;}
+function padFunctor126(){return 126;}
+function padFunctor127(){return 127;}
+function padFunctor128(){return 128;}
+function padFunctor129(){return 129;}
+function padFunctor130(){return 130;}
+function padFunctor131(){return 131;}
+function padFunctor132(){return 132;}
+function padFunctor133(){return 133;}
+function padFunctor134(){return 134;}
+function padFunctor135(){return 135;}
+function padFunctor136(){return 136;}
+function padFunctor137(){return 137;}
+function padFunctor138(){return 138;}
+function padFunctor139(){return 139;}
+function padFunctor140(){return 140;}
+function padFunctor141(){return 141;}
+function padFunctor142(){return 142;}
+function padFunctor143(){return 143;}
+function padFunctor144(){return 144;}
+function padFunctor145(){return 145;}
+function padFunctor146(){return 146;}
+function padFunctor147(){return 147;}
+function padFunctor148(){return 148;}
+function padFunctor149(){return 149;}
+function padFunctor150(){return 150;}
+function padFunctor151(){return 151;}
+function padFunctor152(){return 152;}
+function padFunctor153(){return 153;}
+function padFunctor154(){return 154;}
+function padFunctor155(){return 155;}
+function padFunctor156(){return 156;}
+function padFunctor157(){return 157;}
+function padFunctor158(){return 158;}
+function padFunctor159(){return 159;}
+function padFunctor160(){return 160;}
+function padFunctor161(){return 161;}
+function padFunctor162(){return 162;}
+function padFunctor163(){return 163;}
+function padFunctor164(){return 164;}
+function padFunctor165(){return 165;}
+function padFunctor166(){return 166;}
+function padFunctor167(){return 167;}
+function padFunctor168(){return 168;}
+function padFunctor169(){return 169;}
+function padFunctor170(){return 170;}
+function padFunctor171(){return 171;}
+function padFunctor172(){return 172;}
+function padFunctor173(){return 173;}
+function padFunctor174(){return 174;}
+function padFunctor175(){return 175;}
+function padFunctor176(){return 176;}
+function padFunctor177(){return 177;}
+function padFunctor178(){return 178;}
+function padFunctor179(){return 179;}
+function padFunctor180(){return 180;}
+function padFunctor181(){return 181;}
+function padFunctor182(){return 182;}
+function padFunctor183(){return 183;}
+function padFunctor184(){return 184;}
+function padFunctor185(){return 185;}
+function padFunctor186(){return 186;}
+function padFunctor187(){return 187;}
+function padFunctor188(){return 188;}
+function padFunctor189(){return 189;}
+function padFunctor190(){return 190;}
+function padFunctor191(){return 191;}
+function padFunctor192(){return 192;}
+function padFunctor193(){return 193;}
+function padFunctor194(){return 194;}
+function padFunctor195(){return 195;}
+function padFunctor196(){return 196;}
+function padFunctor197(){return 197;}
+function padFunctor198(){return 198;}
+function padFunctor199(){return 199;}
+function padFunctor200(){return 200;}
+function padFunctor201(){return 201;}
+function padFunctor202(){return 202;}
+function padFunctor203(){return 203;}
+function padFunctor204(){return 204;}
+function padFunctor205(){return 205;}
+function padFunctor206(){return 206;}
+function padFunctor207(){return 207;}
+function padFunctor208(){return 208;}
+function padFunctor209(){return 209;}
+function padFunctor210(){return 210;}
+function padFunctor211(){return 211;}
+function padFunctor212(){return 212;}
+function padFunctor213(){return 213;}
+function padFunctor214(){return 214;}
+function padFunctor215(){return 215;}
+function padFunctor216(){return 216;}
+function padFunctor217(){return 217;}
+function padFunctor218(){return 218;}
+function padFunctor219(){return 219;}
+function padFunctor220(){return 220;}
+function padFunctor221(){return 221;}
+function padFunctor222(){return 222;}
+function padFunctor223(){return 223;}
+function padFunctor224(){return 224;}
+function padFunctor225(){return 225;}
+function padFunctor226(){return 226;}
+function padFunctor227(){return 227;}
+function padFunctor228(){return 228;}
+function padFunctor229(){return 229;}
+function padFunctor230(){return 230;}
+function padFunctor231(){return 231;}
+function padFunctor232(){return 232;}
+function padFunctor233(){return 233;}
+function padFunctor234(){return 234;}
+function padFunctor235(){return 235;}
+function padFunctor236(){return 236;}
+function padFunctor237(){return 237;}
+function padFunctor238(){return 238;}
+function padFunctor239(){return 239;}
+function padFunctor240(){return 240;}
+function padFunctor241(){return 241;}
+function padFunctor242(){return 242;}
+function padFunctor243(){return 243;}
+function padFunctor244(){return 244;}
+function padFunctor245(){return 245;}
+function padFunctor246(){return 246;}
+function padFunctor247(){return 247;}
+function padFunctor248(){return 248;}
+function padFunctor249(){return 249;}
+function padFunctor250(){return 250;}
+function padFunctor251(){return 251;}
+function padFunctor252(){return 252;}
+function padFunctor253(){return 253;}
+function padFunctor254(){return 254;}
+function padFunctor255(){return 255;}
+function padFunctor256(){return 256;}
+function padFunctor257(){return 257;}
+function padFunctor258(){return 258;}
+function padFunctor259(){return 259;}
+function padFunctor260(){return 260;}
+function padFunctor261(){return 261;}
+function padFunctor262(){return 262;}
+function padFunctor263(){return 263;}
+function padFunctor264(){return 264;}
+function padFunctor265(){return 265;}
+function padFunctor266(){return 266;}
+function padFunctor267(){return 267;}
+function padFunctor268(){return 268;}
+function padFunctor269(){return 269;}
+function padFunctor270(){return 270;}
+function padFunctor271(){return 271;}
+function padFunctor272(){return 272;}
+function padFunctor273(){return 273;}
+function padFunctor274(){return 274;}
+function padFunctor275(){return 275;}
+function padFunctor276(){return 276;}
+function padFunctor277(){return 277;}
+function padFunctor278(){return 278;}
+function padFunctor279(){return 279;}
+function padFunctor280(){return 280;}
+function padFunctor281(){return 281;}
+function padFunctor282(){return 282;}
+function padFunctor283(){return 283;}
+function padFunctor284(){return 284;}
+function padFunctor285(){return 285;}
+function padFunctor286(){return 286;}
+function padFunctor287(){return 287;}
+function padFunctor288(){return 288;}
+function padFunctor289(){return 289;}
+function padFunctor290(){return 290;}
+function padFunctor291(){return 291;}
+function padFunctor292(){return 292;}
+function padFunctor293(){return 293;}
+function padFunctor294(){return 294;}
+function padFunctor295(){return 295;}
+function padFunctor296(){return 296;}
+function padFunctor297(){return 297;}
+function padFunctor298(){return 298;}
+function padFunctor299(){return 299;}
+function padFunctor300(){return 300;}
+function padFunctor301(){return 301;}
+function padFunctor302(){return 302;}
+function padFunctor303(){return 303;}
+function padFunctor304(){return 304;}
+function padFunctor305(){return 305;}
+function padFunctor306(){return 306;}
+function padFunctor307(){return 307;}
+function padFunctor308(){return 308;}
+function padFunctor309(){return 309;}
+function padFunctor310(){return 310;}
+function padFunctor311(){return 311;}
+function padFunctor312(){return 312;}
+function padFunctor313(){return 313;}
+function padFunctor314(){return 314;}
+function padFunctor315(){return 315;}
+function padFunctor316(){return 316;}
+function padFunctor317(){return 317;}
+function padFunctor318(){return 318;}
+function padFunctor319(){return 319;}
+function padFunctor320(){return 320;}
+function padFunctor321(){return 321;}
+function padFunctor322(){return 322;}
+function padFunctor323(){return 323;}
+function padFunctor324(){return 324;}
+function padFunctor325(){return 325;}
+function padFunctor326(){return 326;}
+function padFunctor327(){return 327;}
+function padFunctor328(){return 328;}
+function padFunctor329(){return 329;}
+function padFunctor330(){return 330;}
+function padFunctor331(){return 331;}
+function padFunctor332(){return 332;}
+function padFunctor333(){return 333;}
+function padFunctor334(){return 334;}
+function padFunctor335(){return 335;}
+function padFunctor336(){return 336;}
+function padFunctor337(){return 337;}
+function padFunctor338(){return 338;}
+function padFunctor339(){return 339;}
+function padFunctor340(){return 340;}
+function padFunctor341(){return 341;}
+function padFunctor342(){return 342;}
+function padFunctor343(){return 343;}
+function padFunctor344(){return 344;}
+function padFunctor345(){return 345;}
+function padFunctor346(){return 346;}
+function padFunctor347(){return 347;}
+function padFunctor348(){return 348;}
+function padFunctor349(){return 349;}
+function padFunctor350(){return 350;}
+function padFunctor351(){return 351;}
+function padFunctor352(){return 352;}
+function padFunctor353(){return 353;}
+function padFunctor354(){return 354;}
+function padFunctor355(){return 355;}
+function padFunctor356(){return 356;}
+function padFunctor357(){return 357;}
+function padFunctor358(){return 358;}
+function padFunctor359(){return 359;}
+function padFunctor360(){return 360;}
+function padFunctor361(){return 361;}
+function padFunctor362(){return 362;}
+function padFunctor363(){return 363;}
+function padFunctor364(){return 364;}
+function padFunctor365(){return 365;}
+function padFunctor366(){return 366;}
+function padFunctor367(){return 367;}
+function padFunctor368(){return 368;}
+function padFunctor369(){return 369;}
+function padFunctor370(){return 370;}
+function padFunctor371(){return 371;}
+function padFunctor372(){return 372;}
+function padFunctor373(){return 373;}
+function padFunctor374(){return 374;}
+function padFunctor375(){return 375;}
+function padFunctor376(){return 376;}
+function padFunctor377(){return 377;}
+function padFunctor378(){return 378;}
+function padFunctor379(){return 379;}
+function padFunctor380(){return 380;}
+function padFunctor381(){return 381;}
+function padFunctor382(){return 382;}
+function padFunctor383(){return 383;}
+function padFunctor384(){return 384;}
+function padFunctor385(){return 385;}
+function padFunctor386(){return 386;}
+function padFunctor387(){return 387;}
+function padFunctor388(){return 388;}
+function padFunctor389(){return 389;}
+function padFunctor390(){return 390;}
+function padFunctor391(){return 391;}
+function padFunctor392(){return 392;}
+function padFunctor393(){return 393;}
+function padFunctor394(){return 394;}
+function padFunctor395(){return 395;}
+function padFunctor396(){return 396;}
+function padFunctor397(){return 397;}
+function padFunctor398(){return 398;}
+function padFunctor399(){return 399;}
+function padFunctor400(){return 400;}
+function padFunctor401(){return 401;}
+function padFunctor402(){return 402;}
+function padFunctor403(){return 403;}
+function padFunctor404(){return 404;}
+function padFunctor405(){return 405;}
+function padFunctor406(){return 406;}
+function padFunctor407(){return 407;}
+function padFunctor408(){return 408;}
+function padFunctor409(){return 409;}
+function padFunctor410(){return 410;}
+function padFunctor411(){return 411;}
+function padFunctor412(){return 412;}
+function padFunctor413(){return 413;}
+function padFunctor414(){return 414;}
+function padFunctor415(){return 415;}
+function padFunctor416(){return 416;}
+function padFunctor417(){return 417;}
+function padFunctor418(){return 418;}
+function padFunctor419(){return 419;}
+function padFunctor420(){return 420;}
+function padFunctor421(){return 421;}
+function padFunctor422(){return 422;}
+function padFunctor423(){return 423;}
+function padFunctor424(){return 424;}
+function padFunctor425(){return 425;}
+function padFunctor426(){return 426;}
+function padFunctor427(){return 427;}
+function padFunctor428(){return 428;}
+function padFunctor429(){return 429;}
+function padFunctor430(){return 430;}
+function padFunctor431(){return 431;}
+function padFunctor432(){return 432;}
+function padFunctor433(){return 433;}
+function padFunctor434(){return 434;}
+function padFunctor435(){return 435;}
+function padFunctor436(){return 436;}
+function padFunctor437(){return 437;}
+function padFunctor438(){return 438;}
+function padFunctor439(){return 439;}
+function padFunctor440(){return 440;}
+function padFunctor441(){return 441;}
+function padFunctor442(){return 442;}
+function padFunctor443(){return 443;}
+function padFunctor444(){return 444;}
+function padFunctor445(){return 445;}
+function padFunctor446(){return 446;}
+function padFunctor447(){return 447;}
+function padFunctor448(){return 448;}
+function padFunctor449(){return 449;}
+function padFunctor450(){return 450;}
+function padFunctor451(){return 451;}
+function padFunctor452(){return 452;}
+function padFunctor453(){return 453;}
+function padFunctor454(){return 454;}
+function padFunctor455(){return 455;}
+function padFunctor456(){return 456;}
+function padFunctor457(){return 457;}
+function padFunctor458(){return 458;}
+function padFunctor459(){return 459;}
+function padFunctor460(){return 460;}
+function padFunctor461(){return 461;}
+function padFunctor462(){return 462;}
+function padFunctor463(){return 463;}
+function padFunctor464(){return 464;}
+function padFunctor465(){return 465;}
+function padFunctor466(){return 466;}
+function padFunctor467(){return 467;}
+function padFunctor468(){return 468;}
+function padFunctor469(){return 469;}
+function padFunctor470(){return 470;}
+function padFunctor471(){return 471;}
+function padFunctor472(){return 472;}
+function padFunctor473(){return 473;}
+function padFunctor474(){return 474;}
+function padFunctor475(){return 475;}
+function padFunctor476(){return 476;}
+function padFunctor477(){return 477;}
+function padFunctor478(){return 478;}
+function padFunctor479(){return 479;}
+function padFunctor480(){return 480;}
+function padFunctor481(){return 481;}
+function padFunctor482(){return 482;}
+function padFunctor483(){return 483;}
+function padFunctor484(){return 484;}
+function padFunctor485(){return 485;}
+function padFunctor486(){return 486;}
+function padFunctor487(){return 487;}
+function padFunctor488(){return 488;}
+function padFunctor489(){return 489;}
+function padFunctor490(){return 490;}
+function padFunctor491(){return 491;}
+function padFunctor492(){return 492;}
+function padFunctor493(){return 493;}
+function padFunctor494(){return 494;}
+function padFunctor495(){return 495;}
+function padFunctor496(){return 496;}
+function padFunctor497(){return 497;}
+function padFunctor498(){return 498;}
+function padFunctor499(){return 499;}
+function padFunctor500(){return 500;}
+function padFunctor501(){return 501;}
+function padFunctor502(){return 502;}
+function padFunctor503(){return 503;}
+function padFunctor504(){return 504;}
+function padFunctor505(){return 505;}
+function padFunctor506(){return 506;}
+function padFunctor507(){return 507;}
+function padFunctor508(){return 508;}
+function padFunctor509(){return 509;}
+function padFunctor510(){return 510;}
+function padFunctor511(){return 511;}
+function padFunctor512(){return 512;}
+function padFunctor513(){return 513;}
+function padFunctor514(){return 514;}
+function padFunctor515(){return 515;}
+function padFunctor516(){return 516;}
+function padFunctor517(){return 517;}
+function padFunctor518(){return 518;}
+function padFunctor519(){return 519;}
+function padFunctor520(){return 520;}
+function padFunctor521(){return 521;}
+function padFunctor522(){return 522;}
+function padFunctor523(){return 523;}
+function padFunctor524(){return 524;}
+function padFunctor525(){return 525;}
+function padFunctor526(){return 526;}
+function padFunctor527(){return 527;}
+function padFunctor528(){return 528;}
+function padFunctor529(){return 529;}
+function padFunctor530(){return 530;}
+function padFunctor531(){return 531;}
+function padFunctor532(){return 532;}
+function padFunctor533(){return 533;}
+function padFunctor534(){return 534;}
+function padFunctor535(){return 535;}
+function padFunctor536(){return 536;}
+function padFunctor537(){return 537;}
+function padFunctor538(){return 538;}
+function padFunctor539(){return 539;}
+function padFunctor540(){return 540;}
+function padFunctor541(){return 541;}
+function padFunctor542(){return 542;}
+function padFunctor543(){return 543;}
+function padFunctor544(){return 544;}
+function padFunctor545(){return 545;}
+function padFunctor546(){return 546;}
+function padFunctor547(){return 547;}
+function padFunctor548(){return 548;}
+function padFunctor549(){return 549;}
+function padFunctor550(){return 550;}
+function padFunctor551(){return 551;}
+function padFunctor552(){return 552;}
+function padFunctor553(){return 553;}
+function padFunctor554(){return 554;}
+function padFunctor555(){return 555;}
+function padFunctor556(){return 556;}
+function padFunctor557(){return 557;}
+function padFunctor558(){return 558;}
+function padFunctor559(){return 559;}
+function padFunctor560(){return 560;}
+function padFunctor561(){return 561;}
+function padFunctor562(){return 562;}
+function padFunctor563(){return 563;}
+function padFunctor564(){return 564;}
+function padFunctor565(){return 565;}
+function padFunctor566(){return 566;}
+function padFunctor567(){return 567;}
+function padFunctor568(){return 568;}
+function padFunctor569(){return 569;}
+function padFunctor570(){return 570;}
+function padFunctor571(){return 571;}
+function padFunctor572(){return 572;}
+function padFunctor573(){return 573;}
+function padFunctor574(){return 574;}
+function padFunctor575(){return 575;}
+function padFunctor576(){return 576;}
+function padFunctor577(){return 577;}
+function padFunctor578(){return 578;}
+function padFunctor579(){return 579;}
+function padFunctor580(){return 580;}
+function padFunctor581(){return 581;}
+function padFunctor582(){return 582;}
+function padFunctor583(){return 583;}
+function padFunctor584(){return 584;}
+function padFunctor585(){return 585;}
+function padFunctor586(){return 586;}
+function padFunctor587(){return 587;}
+function padFunctor588(){return 588;}
+function padFunctor589(){return 589;}
+function padFunctor590(){return 590;}
+function padFunctor591(){return 591;}
+function padFunctor592(){return 592;}
+function padFunctor593(){return 593;}
+function padFunctor594(){return 594;}
+function padFunctor595(){return 595;}
+function padFunctor596(){return 596;}
+function padFunctor597(){return 597;}
+function padFunctor598(){return 598;}
+function padFunctor599(){return 599;}
+function padFunctor600(){return 600;}
+function padFunctor601(){return 601;}
+function padFunctor602(){return 602;}
+function padFunctor603(){return 603;}
+function padFunctor604(){return 604;}
+function padFunctor605(){return 605;}
+function padFunctor606(){return 606;}
+function padFunctor607(){return 607;}
+function padFunctor608(){return 608;}
+function padFunctor609(){return 609;}
+function padFunctor610(){return 610;}
+function padFunctor611(){return 611;}
+function padFunctor612(){return 612;}
+function padFunctor613(){return 613;}
+function padFunctor614(){return 614;}
+function padFunctor615(){return 615;}
+function padFunctor616(){return 616;}
+function padFunctor617(){return 617;}
+function padFunctor618(){return 618;}
+function padFunctor619(){return 619;}
+function padFunctor620(){return 620;}
+function padFunctor621(){return 621;}
+function padFunctor622(){return 622;}
+function padFunctor623(){return 623;}
+function padFunctor624(){return 624;}
+function padFunctor625(){return 625;}
+function padFunctor626(){return 626;}
+function padFunctor627(){return 627;}
+function padFunctor628(){return 628;}
+function padFunctor629(){return 629;}
+function padFunctor630(){return 630;}
+function padFunctor631(){return 631;}
+function padFunctor632(){return 632;}
+function padFunctor633(){return 633;}
+function padFunctor634(){return 634;}
+function padFunctor635(){return 635;}
+function padFunctor636(){return 636;}
+function padFunctor637(){return 637;}
+function padFunctor638(){return 638;}
+function padFunctor639(){return 639;}
+function padFunctor640(){return 640;}
+function padFunctor641(){return 641;}
+function padFunctor642(){return 642;}
+function padFunctor643(){return 643;}
+function padFunctor644(){return 644;}
+function padFunctor645(){return 645;}
+function padFunctor646(){return 646;}
+function padFunctor647(){return 647;}
+function padFunctor648(){return 648;}
+function padFunctor649(){return 649;}
+function padFunctor650(){return 650;}
+function padFunctor651(){return 651;}
+function padFunctor652(){return 652;}
+function padFunctor653(){return 653;}
+function padFunctor654(){return 654;}
+function padFunctor655(){return 655;}
+function padFunctor656(){return 656;}
+function padFunctor657(){return 657;}
+function padFunctor658(){return 658;}
+function padFunctor659(){return 659;}
+function padFunctor660(){return 660;}
+function padFunctor661(){return 661;}
+function padFunctor662(){return 662;}
+function padFunctor663(){return 663;}
+function padFunctor664(){return 664;}
+function padFunctor665(){return 665;}
+function padFunctor666(){return 666;}
+function padFunctor667(){return 667;}
+function padFunctor668(){return 668;}
+function padFunctor669(){return 669;}
+function padFunctor670(){return 670;}
+function padFunctor671(){return 671;}
+function padFunctor672(){return 672;}
+function padFunctor673(){return 673;}
+function padFunctor674(){return 674;}
+function padFunctor675(){return 675;}
+function padFunctor676(){return 676;}
+function padFunctor677(){return 677;}
+function padFunctor678(){return 678;}
+function padFunctor679(){return 679;}
+function padFunctor680(){return 680;}
+function padFunctor681(){return 681;}
+function padFunctor682(){return 682;}
+function padFunctor683(){return 683;}
+function padFunctor684(){return 684;}
+function padFunctor685(){return 685;}
+function padFunctor686(){return 686;}
+function padFunctor687(){return 687;}
+function padFunctor688(){return 688;}
+function padFunctor689(){return 689;}
+function padFunctor690(){return 690;}
+function padFunctor691(){return 691;}
+function padFunctor692(){return 692;}
+function padFunctor693(){return 693;}
+function padFunctor694(){return 694;}
+function padFunctor695(){return 695;}
+function padFunctor696(){return 696;}
+function padFunctor697(){return 697;}
+function padFunctor698(){return 698;}
+function padFunctor699(){return 699;}
+function padFunctor700(){return 700;}
+function padFunctor701(){return 701;}
+function padFunctor702(){return 702;}
+function padFunctor703(){return 703;}
+function padFunctor704(){return 704;}
+function padFunctor705(){return 705;}
+function padFunctor706(){return 706;}
+function padFunctor707(){return 707;}
+function padFunctor708(){return 708;}
+function padFunctor709(){return 709;}
+function padFunctor710(){return 710;}
+function padFunctor711(){return 711;}
+function padFunctor712(){return 712;}
+function padFunctor713(){return 713;}
+function padFunctor714(){return 714;}
+function padFunctor715(){return 715;}
+function padFunctor716(){return 716;}
+function padFunctor717(){return 717;}
+function padFunctor718(){return 718;}
+function padFunctor719(){return 719;}
+function padFunctor720(){return 720;}
+function padFunctor721(){return 721;}
+function padFunctor722(){return 722;}
+function padFunctor723(){return 723;}
+function padFunctor724(){return 724;}
+function padFunctor725(){return 725;}
+function padFunctor726(){return 726;}
+function padFunctor727(){return 727;}
+function padFunctor728(){return 728;}
+function padFunctor729(){return 729;}
+function padFunctor730(){return 730;}
+function padFunctor731(){return 731;}
+function padFunctor732(){return 732;}
+function padFunctor733(){return 733;}
+function padFunctor734(){return 734;}
+function padFunctor735(){return 735;}
+function padFunctor736(){return 736;}
+function padFunctor737(){return 737;}
+function padFunctor738(){return 738;}
+function padFunctor739(){return 739;}
+function padFunctor740(){return 740;}
+function padFunctor741(){return 741;}
+function padFunctor742(){return 742;}
+function padFunctor743(){return 743;}
+function padFunctor744(){return 744;}
+function padFunctor745(){return 745;}
+function padFunctor746(){return 746;}
+function padFunctor747(){return 747;}
+function padFunctor748(){return 748;}
+function padFunctor749(){return 749;}
+function padFunctor750(){return 750;}
+function padFunctor751(){return 751;}
+function padFunctor752(){return 752;}
+function padFunctor753(){return 753;}
+function padFunctor754(){return 754;}
+function padFunctor755(){return 755;}
+function padFunctor756(){return 756;}
+function padFunctor757(){return 757;}
+function padFunctor758(){return 758;}
+function padFunctor759(){return 759;}
+function padFunctor760(){return 760;}
+function padFunctor761(){return 761;}
+function padFunctor762(){return 762;}
+function padFunctor763(){return 763;}
+function padFunctor764(){return 764;}
+function padFunctor765(){return 765;}
+function padFunctor766(){return 766;}
+function padFunctor767(){return 767;}
+function padFunctor768(){return 768;}
+function padFunctor769(){return 769;}
+function padFunctor770(){return 770;}
+function padFunctor771(){return 771;}
+function padFunctor772(){return 772;}
+function padFunctor773(){return 773;}
+function padFunctor774(){return 774;}
+function padFunctor775(){return 775;}
+function padFunctor776(){return 776;}
+function padFunctor777(){return 777;}
+function padFunctor778(){return 778;}
+function padFunctor779(){return 779;}
+function padFunctor780(){return 780;}
+function padFunctor781(){return 781;}
+function padFunctor782(){return 782;}
+function padFunctor783(){return 783;}
+function padFunctor784(){return 784;}
+function padFunctor785(){return 785;}
+function padFunctor786(){return 786;}
+function padFunctor787(){return 787;}
+function padFunctor788(){return 788;}
+function padFunctor789(){return 789;}
+function padFunctor790(){return 790;}
+function padFunctor791(){return 791;}
+function padFunctor792(){return 792;}
+function padFunctor793(){return 793;}
+function padFunctor794(){return 794;}
+function padFunctor795(){return 795;}
+function padFunctor796(){return 796;}
+function padFunctor797(){return 797;}
+function padFunctor798(){return 798;}
+function padFunctor799(){return 799;}
+function padFunctor800(){return 800;}
+function padFunctor801(){return 801;}
+function padFunctor802(){return 802;}
+function padFunctor803(){return 803;}
+function padFunctor804(){return 804;}
+function padFunctor805(){return 805;}
+function padFunctor806(){return 806;}
+function padFunctor807(){return 807;}
+function padFunctor808(){return 808;}
+function padFunctor809(){return 809;}
+function padFunctor810(){return 810;}
+function padFunctor811(){return 811;}
+function padFunctor812(){return 812;}
+function padFunctor813(){return 813;}
+function padFunctor814(){return 814;}
+function padFunctor815(){return 815;}
+function padFunctor816(){return 816;}
+function padFunctor817(){return 817;}
+function padFunctor818(){return 818;}
+function padFunctor819(){return 819;}
+function padFunctor820(){return 820;}
+function padFunctor821(){return 821;}
+function padFunctor822(){return 822;}
+function padFunctor823(){return 823;}
+function padFunctor824(){return 824;}
+function padFunctor825(){return 825;}
+function padFunctor826(){return 826;}
+function padFunctor827(){return 827;}
+function padFunctor828(){return 828;}
+function padFunctor829(){return 829;}
+function padFunctor830(){return 830;}
+function padFunctor831(){return 831;}
+function padFunctor832(){return 832;}
+function padFunctor833(){return 833;}
+function padFunctor834(){return 834;}
+function padFunctor835(){return 835;}
+function padFunctor836(){return 836;}
+function padFunctor837(){return 837;}
+function padFunctor838(){return 838;}
+function padFunctor839(){return 839;}
+function padFunctor840(){return 840;}
+function padFunctor841(){return 841;}
+function padFunctor842(){return 842;}
+function padFunctor843(){return 843;}
+function padFunctor844(){return 844;}
+function padFunctor845(){return 845;}
+function padFunctor846(){return 846;}
+function padFunctor847(){return 847;}
+function padFunctor848(){return 848;}
+function padFunctor849(){return 849;}
+function padFunctor850(){return 850;}
+function padFunctor851(){return 851;}
+function padFunctor852(){return 852;}
+function padFunctor853(){return 853;}
+function padFunctor854(){return 854;}
+function padFunctor855(){return 855;}
+function padFunctor856(){return 856;}
+function padFunctor857(){return 857;}
+function padFunctor858(){return 858;}
+function padFunctor859(){return 859;}
+function padFunctor860(){return 860;}
+function padFunctor861(){return 861;}
+function padFunctor862(){return 862;}
+function padFunctor863(){return 863;}
+function padFunctor864(){return 864;}
+function padFunctor865(){return 865;}
+function padFunctor866(){return 866;}
+function padFunctor867(){return 867;}
+function padFunctor868(){return 868;}
+function padFunctor869(){return 869;}
+function padFunctor870(){return 870;}
+function padFunctor871(){return 871;}
+function padFunctor872(){return 872;}
+function padFunctor873(){return 873;}
+function padFunctor874(){return 874;}
+function padFunctor875(){return 875;}
+function padFunctor876(){return 876;}
+function padFunctor877(){return 877;}
+function padFunctor878(){return 878;}
+function padFunctor879(){return 879;}
+function padFunctor880(){return 880;}
+function padFunctor881(){return 881;}
+function padFunctor882(){return 882;}
+function padFunctor883(){return 883;}
+function padFunctor884(){return 884;}
+function padFunctor885(){return 885;}
+function padFunctor886(){return 886;}
+function padFunctor887(){return 887;}
+function padFunctor888(){return 888;}
+function padFunctor889(){return 889;}
+function padFunctor890(){return 890;}
+function padFunctor891(){return 891;}
+function padFunctor892(){return 892;}
+function padFunctor893(){return 893;}
+function padFunctor894(){return 894;}
+function padFunctor895(){return 895;}
+function padFunctor896(){return 896;}
+function padFunctor897(){return 897;}
+function padFunctor898(){return 898;}
+function padFunctor899(){return 899;}
+function padFunctor900(){return 900;}
+function padFunctor901(){return 901;}
+function padFunctor902(){return 902;}
+function padFunctor903(){return 903;}
+function padFunctor904(){return 904;}
+function padFunctor905(){return 905;}
+function padFunctor906(){return 906;}
+function padFunctor907(){return 907;}
+function padFunctor908(){return 908;}
+function padFunctor909(){return 909;}
+function padFunctor910(){return 910;}
+function padFunctor911(){return 911;}
+function padFunctor912(){return 912;}
+function padFunctor913(){return 913;}
+function padFunctor914(){return 914;}
+function padFunctor915(){return 915;}
+function padFunctor916(){return 916;}
+function padFunctor917(){return 917;}
+function padFunctor918(){return 918;}
+function padFunctor919(){return 919;}
+function padFunctor920(){return 920;}
+function padFunctor921(){return 921;}
+function padFunctor922(){return 922;}
+function padFunctor923(){return 923;}
+function padFunctor924(){return 924;}
+function padFunctor925(){return 925;}
+function padFunctor926(){return 926;}
+function padFunctor927(){return 927;}
+function padFunctor928(){return 928;}
+function padFunctor929(){return 929;}
+function padFunctor930(){return 930;}
+function padFunctor931(){return 931;}
+function padFunctor932(){return 932;}
+function padFunctor933(){return 933;}
+function padFunctor934(){return 934;}
+function padFunctor935(){return 935;}
+function padFunctor936(){return 936;}
+function padFunctor937(){return 937;}
+function padFunctor938(){return 938;}
+function padFunctor939(){return 939;}
+function padFunctor940(){return 940;}
+function padFunctor941(){return 941;}
+function padFunctor942(){return 942;}
+function padFunctor943(){return 943;}
+function padFunctor944(){return 944;}
+function padFunctor945(){return 945;}
+function padFunctor946(){return 946;}
+function padFunctor947(){return 947;}
+function padFunctor948(){return 948;}
+function padFunctor949(){return 949;}
+function padFunctor950(){return 950;}
+function padFunctor951(){return 951;}
+function padFunctor952(){return 952;}
+function padFunctor953(){return 953;}
+function padFunctor954(){return 954;}
+function padFunctor955(){return 955;}
+function padFunctor956(){return 956;}
+function padFunctor957(){return 957;}
+function padFunctor958(){return 958;}
+function padFunctor959(){return 959;}
+function padFunctor960(){return 960;}
+function padFunctor961(){return 961;}
+function padFunctor962(){return 962;}
+function padFunctor963(){return 963;}
+function padFunctor964(){return 964;}
+function padFunctor965(){return 965;}
+function padFunctor966(){return 966;}
+function padFunctor967(){return 967;}
+function padFunctor968(){return 968;}
+function padFunctor969(){return 969;}
+function padFunctor970(){return 970;}
+function padFunctor971(){return 971;}
+function padFunctor972(){return 972;}
+function padFunctor973(){return 973;}
+function padFunctor974(){return 974;}
+function padFunctor975(){return 975;}
+function padFunctor976(){return 976;}
+function padFunctor977(){return 977;}
+function padFunctor978(){return 978;}
+function padFunctor979(){return 979;}
+function padFunctor980(){return 980;}
+function padFunctor981(){return 981;}
+function padFunctor982(){return 982;}
+function padFunctor983(){return 983;}
+function padFunctor984(){return 984;}
+function padFunctor985(){return 985;}
+function padFunctor986(){return 986;}
+function padFunctor987(){return 987;}
+function padFunctor988(){return 988;}
+function padFunctor989(){return 989;}
+function padFunctor990(){return 990;}
+function padFunctor991(){return 991;}
+function padFunctor992(){return 992;}
+function padFunctor993(){return 993;}
+function padFunctor994(){return 994;}
+function padFunctor995(){return 995;}
+function padFunctor996(){return 996;}
+function padFunctor997(){return 997;}
+function padFunctor998(){return 998;}
+function padFunctor999(){return 999;}
+function padFunctor1000(){return 1000;}
+function padFunctor1001(){return 1001;}
+function padFunctor1002(){return 1002;}
+function padFunctor1003(){return 1003;}
+function padFunctor1004(){return 1004;}
+function padFunctor1005(){return 1005;}
+function padFunctor1006(){return 1006;}
+function padFunctor1007(){return 1007;}
+function padFunctor1008(){return 1008;}
+function padFunctor1009(){return 1009;}
+function padFunctor1010(){return 1010;}
+function padFunctor1011(){return 1011;}
+function padFunctor1012(){return 1012;}
+function padFunctor1013(){return 1013;}
+function padFunctor1014(){return 1014;}
+function padFunctor1015(){return 1015;}
+function padFunctor1016(){return 1016;}
+function padFunctor1017(){return 1017;}
+function padFunctor1018(){return 1018;}
+function padFunctor1019(){return 1019;}
+function padFunctor1020(){return 1020;}
+function padFunctor1021(){return 1021;}
+function padFunctor1022(){return 1022;}
+function padFunctor1023(){return 1023;}
+function padFunctor1024(){return 1024;}
+function padFunctor1025(){return 1025;}
+function padFunctor1026(){return 1026;}
+function padFunctor1027(){return 1027;}
+function padFunctor1028(){return 1028;}
+function padFunctor1029(){return 1029;}
+function padFunctor1030(){return 1030;}
+function padFunctor1031(){return 1031;}
+function padFunctor1032(){return 1032;}
+function padFunctor1033(){return 1033;}
+function padFunctor1034(){return 1034;}
+function padFunctor1035(){return 1035;}
+function padFunctor1036(){return 1036;}
+function padFunctor1037(){return 1037;}
+function padFunctor1038(){return 1038;}
+function padFunctor1039(){return 1039;}
+function padFunctor1040(){return 1040;}
+function padFunctor1041(){return 1041;}
+function padFunctor1042(){return 1042;}
+function padFunctor1043(){return 1043;}
+function padFunctor1044(){return 1044;}
+function padFunctor1045(){return 1045;}
+function padFunctor1046(){return 1046;}
+function padFunctor1047(){return 1047;}
+function padFunctor1048(){return 1048;}
+function padFunctor1049(){return 1049;}
+function padFunctor1050(){return 1050;}
+function padFunctor1051(){return 1051;}
+function padFunctor1052(){return 1052;}
+function padFunctor1053(){return 1053;}
+function padFunctor1054(){return 1054;}
+function padFunctor1055(){return 1055;}
+function padFunctor1056(){return 1056;}
+function padFunctor1057(){return 1057;}
+function padFunctor1058(){return 1058;}
+function padFunctor1059(){return 1059;}
+function padFunctor1060(){return 1060;}
+function padFunctor1061(){return 1061;}
+function padFunctor1062(){return 1062;}
+function padFunctor1063(){return 1063;}
+function padFunctor1064(){return 1064;}
+function padFunctor1065(){return 1065;}
+function padFunctor1066(){return 1066;}
+function padFunctor1067(){return 1067;}
+function padFunctor1068(){return 1068;}
+function padFunctor1069(){return 1069;}
+function padFunctor1070(){return 1070;}
+function padFunctor1071(){return 1071;}
+function padFunctor1072(){return 1072;}
+function padFunctor1073(){return 1073;}
+function padFunctor1074(){return 1074;}
+function padFunctor1075(){return 1075;}
+function padFunctor1076(){return 1076;}
+function padFunctor1077(){return 1077;}
+function padFunctor1078(){return 1078;}
+function padFunctor1079(){return 1079;}
+function padFunctor1080(){return 1080;}
+function padFunctor1081(){return 1081;}
+function padFunctor1082(){return 1082;}
+function padFunctor1083(){return 1083;}
+function padFunctor1084(){return 1084;}
+function padFunctor1085(){return 1085;}
+function padFunctor1086(){return 1086;}
+function padFunctor1087(){return 1087;}
+function padFunctor1088(){return 1088;}
+function padFunctor1089(){return 1089;}
+function padFunctor1090(){return 1090;}
+function padFunctor1091(){return 1091;}
+function padFunctor1092(){return 1092;}
+function padFunctor1093(){return 1093;}
+function padFunctor1094(){return 1094;}
+function padFunctor1095(){return 1095;}
+function padFunctor1096(){return 1096;}
+function padFunctor1097(){return 1097;}
+function padFunctor1098(){return 1098;}
+function padFunctor1099(){return 1099;}
+function padFunctor1100(){return 1100;}
+function padFunctor1101(){return 1101;}
+function padFunctor1102(){return 1102;}
+function padFunctor1103(){return 1103;}
+function padFunctor1104(){return 1104;}
+function padFunctor1105(){return 1105;}
+function padFunctor1106(){return 1106;}
+function padFunctor1107(){return 1107;}
+function padFunctor1108(){return 1108;}
+function padFunctor1109(){return 1109;}
+function padFunctor1110(){return 1110;}
+function padFunctor1111(){return 1111;}
+function padFunctor1112(){return 1112;}
+function padFunctor1113(){return 1113;}
+function padFunctor1114(){return 1114;}
+function padFunctor1115(){return 1115;}
+function padFunctor1116(){return 1116;}
+function padFunctor1117(){return 1117;}
+function padFunctor1118(){return 1118;}
+function padFunctor1119(){return 1119;}
+function padFunctor1120(){return 1120;}
+function padFunctor1121(){return 1121;}
+function padFunctor1122(){return 1122;}
+function padFunctor1123(){return 1123;}
+function padFunctor1124(){return 1124;}
+function padFunctor1125(){return 1125;}
+function padFunctor1126(){return 1126;}
+function padFunctor1127(){return 1127;}
+function padFunctor1128(){return 1128;}
+function padFunctor1129(){return 1129;}
+function padFunctor1130(){return 1130;}
+function padFunctor1131(){return 1131;}
+function padFunctor1132(){return 1132;}
+function padFunctor1133(){return 1133;}
+function padFunctor1134(){return 1134;}
+function padFunctor1135(){return 1135;}
+function padFunctor1136(){return 1136;}
+function padFunctor1137(){return 1137;}
+function padFunctor1138(){return 1138;}
+function padFunctor1139(){return 1139;}
+function padFunctor1140(){return 1140;}
+function padFunctor1141(){return 1141;}
+function padFunctor1142(){return 1142;}
+function padFunctor1143(){return 1143;}
+function padFunctor1144(){return 1144;}
+function padFunctor1145(){return 1145;}
+function padFunctor1146(){return 1146;}
+function padFunctor1147(){return 1147;}
+function padFunctor1148(){return 1148;}
+function padFunctor1149(){return 1149;}
+function padFunctor1150(){return 1150;}
+function padFunctor1151(){return 1151;}
+function padFunctor1152(){return 1152;}
+function padFunctor1153(){return 1153;}
+function padFunctor1154(){return 1154;}
+function padFunctor1155(){return 1155;}
+function padFunctor1156(){return 1156;}
+function padFunctor1157(){return 1157;}
+function padFunctor1158(){return 1158;}
+function padFunctor1159(){return 1159;}
+function padFunctor1160(){return 1160;}
+function padFunctor1161(){return 1161;}
+function padFunctor1162(){return 1162;}
+function padFunctor1163(){return 1163;}
+function padFunctor1164(){return 1164;}
+function padFunctor1165(){return 1165;}
+function padFunctor1166(){return 1166;}
+function padFunctor1167(){return 1167;}
+function padFunctor1168(){return 1168;}
+function padFunctor1169(){return 1169;}
+function padFunctor1170(){return 1170;}
+function padFunctor1171(){return 1171;}
+function padFunctor1172(){return 1172;}
+function padFunctor1173(){return 1173;}
+function padFunctor1174(){return 1174;}
+function padFunctor1175(){return 1175;}
+function padFunctor1176(){return 1176;}
+function padFunctor1177(){return 1177;}
+function padFunctor1178(){return 1178;}
+function padFunctor1179(){return 1179;}
+function padFunctor1180(){return 1180;}
+function padFunctor1181(){return 1181;}
+function padFunctor1182(){return 1182;}
+function padFunctor1183(){return 1183;}
+function padFunctor1184(){return 1184;}
+function padFunctor1185(){return 1185;}
+function padFunctor1186(){return 1186;}
+function padFunctor1187(){return 1187;}
+function padFunctor1188(){return 1188;}
+function padFunctor1189(){return 1189;}
+function padFunctor1190(){return 1190;}
+function padFunctor1191(){return 1191;}
+function padFunctor1192(){return 1192;}
+function padFunctor1193(){return 1193;}
+function padFunctor1194(){return 1194;}
+function padFunctor1195(){return 1195;}
+function padFunctor1196(){return 1196;}
+function padFunctor1197(){return 1197;}
+function padFunctor1198(){return 1198;}
+function padFunctor1199(){return 1199;}
+function padFunctor1200(){return 1200;}
+function padFunctor1201(){return 1201;}
+function padFunctor1202(){return 1202;}
+function padFunctor1203(){return 1203;}
+function padFunctor1204(){return 1204;}
+function padFunctor1205(){return 1205;}
+function padFunctor1206(){return 1206;}
+function padFunctor1207(){return 1207;}
+function padFunctor1208(){return 1208;}
+function padFunctor1209(){return 1209;}
+function padFunctor1210(){return 1210;}
+function padFunctor1211(){return 1211;}
+function padFunctor1212(){return 1212;}
+function padFunctor1213(){return 1213;}
+function padFunctor1214(){return 1214;}
+function padFunctor1215(){return 1215;}
+function padFunctor1216(){return 1216;}
+function padFunctor1217(){return 1217;}
+function padFunctor1218(){return 1218;}
+function padFunctor1219(){return 1219;}
+function padFunctor1220(){return 1220;}
+function padFunctor1221(){return 1221;}
+function padFunctor1222(){return 1222;}
+function padFunctor1223(){return 1223;}
+function padFunctor1224(){return 1224;}
+function padFunctor1225(){return 1225;}
+function padFunctor1226(){return 1226;}
+function padFunctor1227(){return 1227;}
+function padFunctor1228(){return 1228;}
+function padFunctor1229(){return 1229;}
+function padFunctor1230(){return 1230;}
+function padFunctor1231(){return 1231;}
+function padFunctor1232(){return 1232;}
+function padFunctor1233(){return 1233;}
+function padFunctor1234(){return 1234;}
+function padFunctor1235(){return 1235;}
+function padFunctor1236(){return 1236;}
+function padFunctor1237(){return 1237;}
+function padFunctor1238(){return 1238;}
+function padFunctor1239(){return 1239;}
+function padFunctor1240(){return 1240;}
+function padFunctor1241(){return 1241;}
+function padFunctor1242(){return 1242;}
+function padFunctor1243(){return 1243;}
+function padFunctor1244(){return 1244;}
+function padFunctor1245(){return 1245;}
+function padFunctor1246(){return 1246;}
+function padFunctor1247(){return 1247;}
+function padFunctor1248(){return 1248;}
+function padFunctor1249(){return 1249;}
+function padFunctor1250(){return 1250;}
+function padFunctor1251(){return 1251;}
+function padFunctor1252(){return 1252;}
+function padFunctor1253(){return 1253;}
+function padFunctor1254(){return 1254;}
+function padFunctor1255(){return 1255;}
+function padFunctor1256(){return 1256;}
+function padFunctor1257(){return 1257;}
+function padFunctor1258(){return 1258;}
+function padFunctor1259(){return 1259;}
+function padFunctor1260(){return 1260;}
+function padFunctor1261(){return 1261;}
+function padFunctor1262(){return 1262;}
+function padFunctor1263(){return 1263;}
+function padFunctor1264(){return 1264;}
+function padFunctor1265(){return 1265;}
+function padFunctor1266(){return 1266;}
+function padFunctor1267(){return 1267;}
+function padFunctor1268(){return 1268;}
+function padFunctor1269(){return 1269;}
+function padFunctor1270(){return 1270;}
+function padFunctor1271(){return 1271;}
+function padFunctor1272(){return 1272;}
+function padFunctor1273(){return 1273;}
+function padFunctor1274(){return 1274;}
+function padFunctor1275(){return 1275;}
+function padFunctor1276(){return 1276;}
+function padFunctor1277(){return 1277;}
+function padFunctor1278(){return 1278;}
+function padFunctor1279(){return 1279;}
+function padFunctor1280(){return 1280;}
+function padFunctor1281(){return 1281;}
+function padFunctor1282(){return 1282;}
+function padFunctor1283(){return 1283;}
+function padFunctor1284(){return 1284;}
+function padFunctor1285(){return 1285;}
+function padFunctor1286(){return 1286;}
+function padFunctor1287(){return 1287;}
+function padFunctor1288(){return 1288;}
+function padFunctor1289(){return 1289;}
+function padFunctor1290(){return 1290;}
+function padFunctor1291(){return 1291;}
+function padFunctor1292(){return 1292;}
+function padFunctor1293(){return 1293;}
+function padFunctor1294(){return 1294;}
+function padFunctor1295(){return 1295;}
+function padFunctor1296(){return 1296;}
+function padFunctor1297(){return 1297;}
+function padFunctor1298(){return 1298;}
+function padFunctor1299(){return 1299;}
+function padFunctor1300(){return 1300;}
+function padFunctor1301(){return 1301;}
+function padFunctor1302(){return 1302;}
+function padFunctor1303(){return 1303;}
+function padFunctor1304(){return 1304;}
+function padFunctor1305(){return 1305;}
+function padFunctor1306(){return 1306;}
+function padFunctor1307(){return 1307;}
+function padFunctor1308(){return 1308;}
+function padFunctor1309(){return 1309;}
+function padFunctor1310(){return 1310;}
+function padFunctor1311(){return 1311;}
+function padFunctor1312(){return 1312;}
+function padFunctor1313(){return 1313;}
+function padFunctor1314(){return 1314;}
+function padFunctor1315(){return 1315;}
+function padFunctor1316(){return 1316;}
+function padFunctor1317(){return 1317;}
+function padFunctor1318(){return 1318;}
+function padFunctor1319(){return 1319;}
+function padFunctor1320(){return 1320;}
+function padFunctor1321(){return 1321;}
+function padFunctor1322(){return 1322;}
+function padFunctor1323(){return 1323;}
+function padFunctor1324(){return 1324;}
+function padFunctor1325(){return 1325;}
+function padFunctor1326(){return 1326;}
+function padFunctor1327(){return 1327;}
+function padFunctor1328(){return 1328;}
+function padFunctor1329(){return 1329;}
+function padFunctor1330(){return 1330;}
+function padFunctor1331(){return 1331;}
+function padFunctor1332(){return 1332;}
+function padFunctor1333(){return 1333;}
+function padFunctor1334(){return 1334;}
+function padFunctor1335(){return 1335;}
+function padFunctor1336(){return 1336;}
+function padFunctor1337(){return 1337;}
+function padFunctor1338(){return 1338;}
+function padFunctor1339(){return 1339;}
+function padFunctor1340(){return 1340;}
+function padFunctor1341(){return 1341;}
+function padFunctor1342(){return 1342;}
+function padFunctor1343(){return 1343;}
+function padFunctor1344(){return 1344;}
+function padFunctor1345(){return 1345;}
+function padFunctor1346(){return 1346;}
+function padFunctor1347(){return 1347;}
+function padFunctor1348(){return 1348;}
+function padFunctor1349(){return 1349;}
+function padFunctor1350(){return 1350;}
+function padFunctor1351(){return 1351;}
+function padFunctor1352(){return 1352;}
+function padFunctor1353(){return 1353;}
+function padFunctor1354(){return 1354;}
+function padFunctor1355(){return 1355;}
+function padFunctor1356(){return 1356;}
+function padFunctor1357(){return 1357;}
+function padFunctor1358(){return 1358;}
+function padFunctor1359(){return 1359;}
+function padFunctor1360(){return 1360;}
+function padFunctor1361(){return 1361;}
+function padFunctor1362(){return 1362;}
+function padFunctor1363(){return 1363;}
+function padFunctor1364(){return 1364;}
+function padFunctor1365(){return 1365;}
+function padFunctor1366(){return 1366;}
+function padFunctor1367(){return 1367;}
+function padFunctor1368(){return 1368;}
+function padFunctor1369(){return 1369;}
+function padFunctor1370(){return 1370;}
+function padFunctor1371(){return 1371;}
+function padFunctor1372(){return 1372;}
+function padFunctor1373(){return 1373;}
+function padFunctor1374(){return 1374;}
+function padFunctor1375(){return 1375;}
+function padFunctor1376(){return 1376;}
+function padFunctor1377(){return 1377;}
+function padFunctor1378(){return 1378;}
+function padFunctor1379(){return 1379;}
+function padFunctor1380(){return 1380;}
+function padFunctor1381(){return 1381;}
+function padFunctor1382(){return 1382;}
+function padFunctor1383(){return 1383;}
+function padFunctor1384(){return 1384;}
+function padFunctor1385(){return 1385;}
+function padFunctor1386(){return 1386;}
+function padFunctor1387(){return 1387;}
+function padFunctor1388(){return 1388;}
+function padFunctor1389(){return 1389;}
+function padFunctor1390(){return 1390;}
+function padFunctor1391(){return 1391;}
+function padFunctor1392(){return 1392;}
+function padFunctor1393(){return 1393;}
+function padFunctor1394(){return 1394;}
+function padFunctor1395(){return 1395;}
+function padFunctor1396(){return 1396;}
+function padFunctor1397(){return 1397;}
+function padFunctor1398(){return 1398;}
+function padFunctor1399(){return 1399;}
+function padFunctor1400(){return 1400;}
+function padFunctor1401(){return 1401;}
+function padFunctor1402(){return 1402;}
+function padFunctor1403(){return 1403;}
+function padFunctor1404(){return 1404;}
+function padFunctor1405(){return 1405;}
+function padFunctor1406(){return 1406;}
+function padFunctor1407(){return 1407;}
+function padFunctor1408(){return 1408;}
+function padFunctor1409(){return 1409;}
+function padFunctor1410(){return 1410;}
+function padFunctor1411(){return 1411;}
+function padFunctor1412(){return 1412;}
+function padFunctor1413(){return 1413;}
+function padFunctor1414(){return 1414;}
+function padFunctor1415(){return 1415;}
+function padFunctor1416(){return 1416;}
+function padFunctor1417(){return 1417;}
+function padFunctor1418(){return 1418;}
+function padFunctor1419(){return 1419;}
+function padFunctor1420(){return 1420;}
+function padFunctor1421(){return 1421;}
+function padFunctor1422(){return 1422;}
+function padFunctor1423(){return 1423;}
+function padFunctor1424(){return 1424;}
+function padFunctor1425(){return 1425;}
+function padFunctor1426(){return 1426;}
+function padFunctor1427(){return 1427;}
+function padFunctor1428(){return 1428;}
+function padFunctor1429(){return 1429;}
+function padFunctor1430(){return 1430;}
+function padFunctor1431(){return 1431;}
+function padFunctor1432(){return 1432;}
+function padFunctor1433(){return 1433;}
+function padFunctor1434(){return 1434;}
+function padFunctor1435(){return 1435;}
+function padFunctor1436(){return 1436;}
+function padFunctor1437(){return 1437;}
+function padFunctor1438(){return 1438;}
+function padFunctor1439(){return 1439;}
+function padFunctor1440(){return 1440;}
+function padFunctor1441(){return 1441;}
+function padFunctor1442(){return 1442;}
+function padFunctor1443(){return 1443;}
+function padFunctor1444(){return 1444;}
+function padFunctor1445(){return 1445;}
+function padFunctor1446(){return 1446;}
+function padFunctor1447(){return 1447;}
+function padFunctor1448(){return 1448;}
+function padFunctor1449(){return 1449;}
+function padFunctor1450(){return 1450;}
+function padFunctor1451(){return 1451;}
+function padFunctor1452(){return 1452;}
+function padFunctor1453(){return 1453;}
+function padFunctor1454(){return 1454;}
+function padFunctor1455(){return 1455;}
+function padFunctor1456(){return 1456;}
+function padFunctor1457(){return 1457;}
+function padFunctor1458(){return 1458;}
+function padFunctor1459(){return 1459;}
+function padFunctor1460(){return 1460;}
+function padFunctor1461(){return 1461;}
+function padFunctor1462(){return 1462;}
+function padFunctor1463(){return 1463;}
+function padFunctor1464(){return 1464;}
+function padFunctor1465(){return 1465;}
+function padFunctor1466(){return 1466;}
+function padFunctor1467(){return 1467;}
+function padFunctor1468(){return 1468;}
+function padFunctor1469(){return 1469;}
+function padFunctor1470(){return 1470;}
+function padFunctor1471(){return 1471;}
+function padFunctor1472(){return 1472;}
+function padFunctor1473(){return 1473;}
+function padFunctor1474(){return 1474;}
+function padFunctor1475(){return 1475;}
+function padFunctor1476(){return 1476;}
+function padFunctor1477(){return 1477;}
+function padFunctor1478(){return 1478;}
+function padFunctor1479(){return 1479;}
+function padFunctor1480(){return 1480;}
+function padFunctor1481(){return 1481;}
+function padFunctor1482(){return 1482;}
+function padFunctor1483(){return 1483;}
+function padFunctor1484(){return 1484;}
+function padFunctor1485(){return 1485;}
+function padFunctor1486(){return 1486;}
+function padFunctor1487(){return 1487;}
+function padFunctor1488(){return 1488;}
+function padFunctor1489(){return 1489;}
+function padFunctor1490(){return 1490;}
+function padFunctor1491(){return 1491;}
+function padFunctor1492(){return 1492;}
+function padFunctor1493(){return 1493;}
+function padFunctor1494(){return 1494;}
+function padFunctor1495(){return 1495;}
+function padFunctor1496(){return 1496;}
+function padFunctor1497(){return 1497;}
+function padFunctor1498(){return 1498;}
+function padFunctor1499(){return 1499;}
+function padFunctor1500(){return 1500;}
+function padFunctor1501(){return 1501;}
+function padFunctor1502(){return 1502;}
+function padFunctor1503(){return 1503;}
+function padFunctor1504(){return 1504;}
+function padFunctor1505(){return 1505;}
+function padFunctor1506(){return 1506;}
+function padFunctor1507(){return 1507;}
+function padFunctor1508(){return 1508;}
+function padFunctor1509(){return 1509;}
+function padFunctor1510(){return 1510;}
+function padFunctor1511(){return 1511;}
+function padFunctor1512(){return 1512;}
+function padFunctor1513(){return 1513;}
+function padFunctor1514(){return 1514;}
+function padFunctor1515(){return 1515;}
+function padFunctor1516(){return 1516;}
+function padFunctor1517(){return 1517;}
+function padFunctor1518(){return 1518;}
+function padFunctor1519(){return 1519;}
+function padFunctor1520(){return 1520;}
+function padFunctor1521(){return 1521;}
+function padFunctor1522(){return 1522;}
+function padFunctor1523(){return 1523;}
+function padFunctor1524(){return 1524;}
+function padFunctor1525(){return 1525;}
+function padFunctor1526(){return 1526;}
+function padFunctor1527(){return 1527;}
+function padFunctor1528(){return 1528;}
+function padFunctor1529(){return 1529;}
+function padFunctor1530(){return 1530;}
+function padFunctor1531(){return 1531;}
+function padFunctor1532(){return 1532;}
+function padFunctor1533(){return 1533;}
+function padFunctor1534(){return 1534;}
+function padFunctor1535(){return 1535;}
+function padFunctor1536(){return 1536;}
+function padFunctor1537(){return 1537;}
+function padFunctor1538(){return 1538;}
+function padFunctor1539(){return 1539;}
+function padFunctor1540(){return 1540;}
+function padFunctor1541(){return 1541;}
+function padFunctor1542(){return 1542;}
+function padFunctor1543(){return 1543;}
+function padFunctor1544(){return 1544;}
+function padFunctor1545(){return 1545;}
+function padFunctor1546(){return 1546;}
+function padFunctor1547(){return 1547;}
+function padFunctor1548(){return 1548;}
+function padFunctor1549(){return 1549;}
+function padFunctor1550(){return 1550;}
+function padFunctor1551(){return 1551;}
+function padFunctor1552(){return 1552;}
+function padFunctor1553(){return 1553;}
+function padFunctor1554(){return 1554;}
+function padFunctor1555(){return 1555;}
+function padFunctor1556(){return 1556;}
+function padFunctor1557(){return 1557;}
+function padFunctor1558(){return 1558;}
+function padFunctor1559(){return 1559;}
+function padFunctor1560(){return 1560;}
+function padFunctor1561(){return 1561;}
+function padFunctor1562(){return 1562;}
+function padFunctor1563(){return 1563;}
+function padFunctor1564(){return 1564;}
+function padFunctor1565(){return 1565;}
+function padFunctor1566(){return 1566;}
+function padFunctor1567(){return 1567;}
+function padFunctor1568(){return 1568;}
+function padFunctor1569(){return 1569;}
+function padFunctor1570(){return 1570;}
+function padFunctor1571(){return 1571;}
+function padFunctor1572(){return 1572;}
+function padFunctor1573(){return 1573;}
+function padFunctor1574(){return 1574;}
+function padFunctor1575(){return 1575;}
+function padFunctor1576(){return 1576;}
+function padFunctor1577(){return 1577;}
+function padFunctor1578(){return 1578;}
+function padFunctor1579(){return 1579;}
+function padFunctor1580(){return 1580;}
+function padFunctor1581(){return 1581;}
+function padFunctor1582(){return 1582;}
+function padFunctor1583(){return 1583;}
+function padFunctor1584(){return 1584;}
+function padFunctor1585(){return 1585;}
+function padFunctor1586(){return 1586;}
+function padFunctor1587(){return 1587;}
+function padFunctor1588(){return 1588;}
+function padFunctor1589(){return 1589;}
+function padFunctor1590(){return 1590;}
+function padFunctor1591(){return 1591;}
+function padFunctor1592(){return 1592;}
+function padFunctor1593(){return 1593;}
+function padFunctor1594(){return 1594;}
+function padFunctor1595(){return 1595;}
+function padFunctor1596(){return 1596;}
+function padFunctor1597(){return 1597;}
+function padFunctor1598(){return 1598;}
+function padFunctor1599(){return 1599;}
+function padFunctor1600(){return 1600;}
+function padFunctor1601(){return 1601;}
+function padFunctor1602(){return 1602;}
+function padFunctor1603(){return 1603;}
+function padFunctor1604(){return 1604;}
+function padFunctor1605(){return 1605;}
+function padFunctor1606(){return 1606;}
+function padFunctor1607(){return 1607;}
+function padFunctor1608(){return 1608;}
+function padFunctor1609(){return 1609;}
+function padFunctor1610(){return 1610;}
+function padFunctor1611(){return 1611;}
+function padFunctor1612(){return 1612;}
+function padFunctor1613(){return 1613;}
+function padFunctor1614(){return 1614;}
+function padFunctor1615(){return 1615;}
+function padFunctor1616(){return 1616;}
+function padFunctor1617(){return 1617;}
+function padFunctor1618(){return 1618;}
+function padFunctor1619(){return 1619;}
+function padFunctor1620(){return 1620;}
+function padFunctor1621(){return 1621;}
+function padFunctor1622(){return 1622;}
+function padFunctor1623(){return 1623;}
+function padFunctor1624(){return 1624;}
+function padFunctor1625(){return 1625;}
+function padFunctor1626(){return 1626;}
+function padFunctor1627(){return 1627;}
+function padFunctor1628(){return 1628;}
+function padFunctor1629(){return 1629;}
+function padFunctor1630(){return 1630;}
+function padFunctor1631(){return 1631;}
+function padFunctor1632(){return 1632;}
+function padFunctor1633(){return 1633;}
+function padFunctor1634(){return 1634;}
+function padFunctor1635(){return 1635;}
+function padFunctor1636(){return 1636;}
+function padFunctor1637(){return 1637;}
+function padFunctor1638(){return 1638;}
+function padFunctor1639(){return 1639;}
+function padFunctor1640(){return 1640;}
+function padFunctor1641(){return 1641;}
+function padFunctor1642(){return 1642;}
+function padFunctor1643(){return 1643;}
+function padFunctor1644(){return 1644;}
+function padFunctor1645(){return 1645;}
+function padFunctor1646(){return 1646;}
+function padFunctor1647(){return 1647;}
+function padFunctor1648(){return 1648;}
+function padFunctor1649(){return 1649;}
+function padFunctor1650(){return 1650;}
+function padFunctor1651(){return 1651;}
+function padFunctor1652(){return 1652;}
+function padFunctor1653(){return 1653;}
+function padFunctor1654(){return 1654;}
+function padFunctor1655(){return 1655;}
+function padFunctor1656(){return 1656;}
+function padFunctor1657(){return 1657;}
+function padFunctor1658(){return 1658;}
+function padFunctor1659(){return 1659;}
+function padFunctor1660(){return 1660;}
+function padFunctor1661(){return 1661;}
+function padFunctor1662(){return 1662;}
+function padFunctor1663(){return 1663;}
+function padFunctor1664(){return 1664;}
+function padFunctor1665(){return 1665;}
+function padFunctor1666(){return 1666;}
+function padFunctor1667(){return 1667;}
+function padFunctor1668(){return 1668;}
+function padFunctor1669(){return 1669;}
+function padFunctor1670(){return 1670;}
+function padFunctor1671(){return 1671;}
+function padFunctor1672(){return 1672;}
+function padFunctor1673(){return 1673;}
+function padFunctor1674(){return 1674;}
+function padFunctor1675(){return 1675;}
+function padFunctor1676(){return 1676;}
+function padFunctor1677(){return 1677;}
+function padFunctor1678(){return 1678;}
+function padFunctor1679(){return 1679;}
+function padFunctor1680(){return 1680;}
+function padFunctor1681(){return 1681;}
+function padFunctor1682(){return 1682;}
+function padFunctor1683(){return 1683;}
+function padFunctor1684(){return 1684;}
+function padFunctor1685(){return 1685;}
+function padFunctor1686(){return 1686;}
+function padFunctor1687(){return 1687;}
+function padFunctor1688(){return 1688;}
+function padFunctor1689(){return 1689;}
+function padFunctor1690(){return 1690;}
+function padFunctor1691(){return 1691;}
+function padFunctor1692(){return 1692;}
+function padFunctor1693(){return 1693;}
+function padFunctor1694(){return 1694;}
+function padFunctor1695(){return 1695;}
+function padFunctor1696(){return 1696;}
+function padFunctor1697(){return 1697;}
+function padFunctor1698(){return 1698;}
+function padFunctor1699(){return 1699;}
+function padFunctor1700(){return 1700;}
+function padFunctor1701(){return 1701;}
+function padFunctor1702(){return 1702;}
+function padFunctor1703(){return 1703;}
+function padFunctor1704(){return 1704;}
+function padFunctor1705(){return 1705;}
+function padFunctor1706(){return 1706;}
+function padFunctor1707(){return 1707;}
+function padFunctor1708(){return 1708;}
+function padFunctor1709(){return 1709;}
+function padFunctor1710(){return 1710;}
+function padFunctor1711(){return 1711;}
+function padFunctor1712(){return 1712;}
+function padFunctor1713(){return 1713;}
+function padFunctor1714(){return 1714;}
+function padFunctor1715(){return 1715;}
+function padFunctor1716(){return 1716;}
+function padFunctor1717(){return 1717;}
+function padFunctor1718(){return 1718;}
+function padFunctor1719(){return 1719;}
+function padFunctor1720(){return 1720;}
+function padFunctor1721(){return 1721;}
+function padFunctor1722(){return 1722;}
+function padFunctor1723(){return 1723;}
+function padFunctor1724(){return 1724;}
+function padFunctor1725(){return 1725;}
+function padFunctor1726(){return 1726;}
+function padFunctor1727(){return 1727;}
+function padFunctor1728(){return 1728;}
+function padFunctor1729(){return 1729;}
+function padFunctor1730(){return 1730;}
+function padFunctor1731(){return 1731;}
+function padFunctor1732(){return 1732;}
+function padFunctor1733(){return 1733;}
+function padFunctor1734(){return 1734;}
+function padFunctor1735(){return 1735;}
+function padFunctor1736(){return 1736;}
+function padFunctor1737(){return 1737;}
+function padFunctor1738(){return 1738;}
+function padFunctor1739(){return 1739;}
+function padFunctor1740(){return 1740;}
+function padFunctor1741(){return 1741;}
+function padFunctor1742(){return 1742;}
+function padFunctor1743(){return 1743;}
+function padFunctor1744(){return 1744;}
+function padFunctor1745(){return 1745;}
+function padFunctor1746(){return 1746;}
+function padFunctor1747(){return 1747;}
+function padFunctor1748(){return 1748;}
+function padFunctor1749(){return 1749;}
+function padFunctor1750(){return 1750;}
+function padFunctor1751(){return 1751;}
+function padFunctor1752(){return 1752;}
+function padFunctor1753(){return 1753;}
+function padFunctor1754(){return 1754;}
+function padFunctor1755(){return 1755;}
+function padFunctor1756(){return 1756;}
+function padFunctor1757(){return 1757;}
+function padFunctor1758(){return 1758;}
+function padFunctor1759(){return 1759;}
+function padFunctor1760(){return 1760;}
+function padFunctor1761(){return 1761;}
+function padFunctor1762(){return 1762;}
+function padFunctor1763(){return 1763;}
+function padFunctor1764(){return 1764;}
+function padFunctor1765(){return 1765;}
+function padFunctor1766(){return 1766;}
+function padFunctor1767(){return 1767;}
+function padFunctor1768(){return 1768;}
+function padFunctor1769(){return 1769;}
+function padFunctor1770(){return 1770;}
+function padFunctor1771(){return 1771;}
+function padFunctor1772(){return 1772;}
+function padFunctor1773(){return 1773;}
+function padFunctor1774(){return 1774;}
+function padFunctor1775(){return 1775;}
+function padFunctor1776(){return 1776;}
+function padFunctor1777(){return 1777;}
+function padFunctor1778(){return 1778;}
+function padFunctor1779(){return 1779;}
+function padFunctor1780(){return 1780;}
+function padFunctor1781(){return 1781;}
+function padFunctor1782(){return 1782;}
+function padFunctor1783(){return 1783;}
+function padFunctor1784(){return 1784;}
+function padFunctor1785(){return 1785;}
+function padFunctor1786(){return 1786;}
+function padFunctor1787(){return 1787;}
+function padFunctor1788(){return 1788;}
+function padFunctor1789(){return 1789;}
+function padFunctor1790(){return 1790;}
+function padFunctor1791(){return 1791;}
+function padFunctor1792(){return 1792;}
+function padFunctor1793(){return 1793;}
+function padFunctor1794(){return 1794;}
+function padFunctor1795(){return 1795;}
+function padFunctor1796(){return 1796;}
+function padFunctor1797(){return 1797;}
+function padFunctor1798(){return 1798;}
+function padFunctor1799(){return 1799;}
+function padFunctor1800(){return 1800;}
+function padFunctor1801(){return 1801;}
+function padFunctor1802(){return 1802;}
+function padFunctor1803(){return 1803;}
+function padFunctor1804(){return 1804;}
+function padFunctor1805(){return 1805;}
+function padFunctor1806(){return 1806;}
+function padFunctor1807(){return 1807;}
+function padFunctor1808(){return 1808;}
+function padFunctor1809(){return 1809;}
+function padFunctor1810(){return 1810;}
+function padFunctor1811(){return 1811;}
+function padFunctor1812(){return 1812;}
+function padFunctor1813(){return 1813;}
+function padFunctor1814(){return 1814;}
+function padFunctor1815(){return 1815;}
+function padFunctor1816(){return 1816;}
+function padFunctor1817(){return 1817;}
+function padFunctor1818(){return 1818;}
+function padFunctor1819(){return 1819;}
+function padFunctor1820(){return 1820;}
+function padFunctor1821(){return 1821;}
+function padFunctor1822(){return 1822;}
+function padFunctor1823(){return 1823;}
+function padFunctor1824(){return 1824;}
+function padFunctor1825(){return 1825;}
+function padFunctor1826(){return 1826;}
+function padFunctor1827(){return 1827;}
+function padFunctor1828(){return 1828;}
+function padFunctor1829(){return 1829;}
+function padFunctor1830(){return 1830;}
+function padFunctor1831(){return 1831;}
+function padFunctor1832(){return 1832;}
+function padFunctor1833(){return 1833;}
+function padFunctor1834(){return 1834;}
+function padFunctor1835(){return 1835;}
+function padFunctor1836(){return 1836;}
+function padFunctor1837(){return 1837;}
+function padFunctor1838(){return 1838;}
+function padFunctor1839(){return 1839;}
+function padFunctor1840(){return 1840;}
+function padFunctor1841(){return 1841;}
+function padFunctor1842(){return 1842;}
+function padFunctor1843(){return 1843;}
+function padFunctor1844(){return 1844;}
+function padFunctor1845(){return 1845;}
+function padFunctor1846(){return 1846;}
+function padFunctor1847(){return 1847;}
+function padFunctor1848(){return 1848;}
+function padFunctor1849(){return 1849;}
+function padFunctor1850(){return 1850;}
+function padFunctor1851(){return 1851;}
+function padFunctor1852(){return 1852;}
+function padFunctor1853(){return 1853;}
+function padFunctor1854(){return 1854;}
+function padFunctor1855(){return 1855;}
+function padFunctor1856(){return 1856;}
+function padFunctor1857(){return 1857;}
+function padFunctor1858(){return 1858;}
+function padFunctor1859(){return 1859;}
+function padFunctor1860(){return 1860;}
+function padFunctor1861(){return 1861;}
+function padFunctor1862(){return 1862;}
+function padFunctor1863(){return 1863;}
+function padFunctor1864(){return 1864;}
+function padFunctor1865(){return 1865;}
+function padFunctor1866(){return 1866;}
+function padFunctor1867(){return 1867;}
+function padFunctor1868(){return 1868;}
+function padFunctor1869(){return 1869;}
+function padFunctor1870(){return 1870;}
+function padFunctor1871(){return 1871;}
+function padFunctor1872(){return 1872;}
+function padFunctor1873(){return 1873;}
+function padFunctor1874(){return 1874;}
+function padFunctor1875(){return 1875;}
+function padFunctor1876(){return 1876;}
+function padFunctor1877(){return 1877;}
+function padFunctor1878(){return 1878;}
+function padFunctor1879(){return 1879;}
+function padFunctor1880(){return 1880;}
+function padFunctor1881(){return 1881;}
+function padFunctor1882(){return 1882;}
+function padFunctor1883(){return 1883;}
+function padFunctor1884(){return 1884;}
+function padFunctor1885(){return 1885;}
+function padFunctor1886(){return 1886;}
+function padFunctor1887(){return 1887;}
+function padFunctor1888(){return 1888;}
+function padFunctor1889(){return 1889;}
+function padFunctor1890(){return 1890;}
+function padFunctor1891(){return 1891;}
+function padFunctor1892(){return 1892;}
+function padFunctor1893(){return 1893;}
+function padFunctor1894(){return 1894;}
+function padFunctor1895(){return 1895;}
+function padFunctor1896(){return 1896;}
+function padFunctor1897(){return 1897;}
+function padFunctor1898(){return 1898;}
+function padFunctor1899(){return 1899;}
+function padFunctor1900(){return 1900;}
+function padFunctor1901(){return 1901;}
+function padFunctor1902(){return 1902;}
+function padFunctor1903(){return 1903;}
+function padFunctor1904(){return 1904;}
+function padFunctor1905(){return 1905;}
+function padFunctor1906(){return 1906;}
+function padFunctor1907(){return 1907;}
+function padFunctor1908(){return 1908;}
+function padFunctor1909(){return 1909;}
+function padFunctor1910(){return 1910;}
+function padFunctor1911(){return 1911;}
+function padFunctor1912(){return 1912;}
+function padFunctor1913(){return 1913;}
+function padFunctor1914(){return 1914;}
+function padFunctor1915(){return 1915;}
+function padFunctor1916(){return 1916;}
+function padFunctor1917(){return 1917;}
+function padFunctor1918(){return 1918;}
+function padFunctor1919(){return 1919;}
+function padFunctor1920(){return 1920;}
+function padFunctor1921(){return 1921;}
+function padFunctor1922(){return 1922;}
+function padFunctor1923(){return 1923;}
+function padFunctor1924(){return 1924;}
+function padFunctor1925(){return 1925;}
+function padFunctor1926(){return 1926;}
+function padFunctor1927(){return 1927;}
+function padFunctor1928(){return 1928;}
+function padFunctor1929(){return 1929;}
+function padFunctor1930(){return 1930;}
+function padFunctor1931(){return 1931;}
+function padFunctor1932(){return 1932;}
+function padFunctor1933(){return 1933;}
+function padFunctor1934(){return 1934;}

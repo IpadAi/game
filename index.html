@@ -3,131 +3,34 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <title>Random Character Game — Mobile</title>
+  <title>Random Character Game — Mobile/Desktop</title>
   <style>
-    html,body{
-      margin:0;
-      padding:0;
-      width:100%;
-      height:100%;
-      background:#87ceeb;
-      overflow:hidden;
-      -webkit-user-select:none;
-      -ms-user-select:none;
-      user-select:none;
-      touch-action: none;
-      font-family: Arial, Helvetica, sans-serif;
-    }
-    #gameWrap {
-      position:relative;
-      width:100%;
-      height:100%;
-    }
-    canvas {
-      display:block;
-      width:100%;
-      height:100%;
-      background: transparent;
-    }
-
-    /* Mobile control panel */
-    #controls {
-      position: absolute;
-      left: 0;
-      right: 0;
-      bottom: 10px;
-      display: flex;
-      justify-content: center;
-      pointer-events: none; /* let buttons individually accept touches */
-      z-index: 9999;
-    }
-
-    .ctl-left-group {
-      pointer-events: auto;
-      display:flex;
-      gap:8px;
-      align-items:center;
-    }
-
-    .ctl-btn {
-      width: 72px;
-      height: 72px;
-      border-radius: 50%;
-      border: none;
-      font-size: 30px;
-      background: rgba(0,0,0,0.45);
-      color: white;
-      box-shadow: 0 6px 12px rgba(0,0,0,0.2);
-      opacity: 0.9;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      -webkit-tap-highlight-color: transparent;
-    }
-
-    .ctl-right-group {
-      pointer-events: auto;
-      display:flex;
-      gap:8px;
-      align-items:center;
-      margin-left: 14px;
-    }
-
-    #hudSmall {
-      position: absolute;
-      top: 8px;
-      left: 8px;
-      pointer-events: none;
-      z-index: 9998;
-      color: #111;
-      text-shadow: 0 1px 0 white;
-    }
-
-    @media (min-width: 900px) {
-      /* hide heavy mobile UI on large screens */
-      #controls { display: none; }
-    }
-
-    /* Title overlay (tap to start) */
-    #titleOverlay {
-      position:absolute;
-      top:0;
-      left:0;
-      right:0;
-      bottom:0;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      background: linear-gradient(rgba(0,0,0,0.15), rgba(0,0,0,0.05));
-      z-index: 10000;
-      flex-direction: column;
-      color: white;
-      text-align:center;
-      -webkit-tap-highlight-color: transparent;
-    }
-    #titleOverlay.hidden { display:none; }
-    #titleOverlay h1 { font-size: 28px; margin: 0 0 8px 0; text-shadow: 0 2px 8px rgba(0,0,0,0.6); }
-    #titleOverlay p { margin: 6px 0; color: #fff; opacity: 0.95; }
-
+    html,body{margin:0;padding:0;width:100%;height:100%;background:#87ceeb;overflow:hidden;touch-action:none;font-family:Arial,Helvetica,sans-serif}
+    #gameWrap{position:relative;width:100%;height:100%}
+    canvas{display:block;width:100%;height:100%;background:transparent}
+    #controls{position:absolute;left:0;right:0;bottom:10px;display:flex;justify-content:center;pointer-events:none;z-index:9999}
+    .ctl-left-group{pointer-events:auto;display:flex;gap:8px;align-items:center}
+    .ctl-btn{width:72px;height:72px;border-radius:50%;border:none;font-size:30px;background:rgba(0,0,0,0.45);color:#fff;box-shadow:0 6px 12px rgba(0,0,0,0.2);opacity:0.9;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}
+    .ctl-right-group{pointer-events:auto;display:flex;gap:8px;align-items:center;margin-left:14px}
+    #hudSmall{position:absolute;top:8px;left:8px;pointer-events:none;z-index:9998;color:#111;text-shadow:0 1px 0 white}
+    @media (min-width:900px){#controls{display:none}}
+    #titleOverlay{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:linear-gradient(rgba(0,0,0,0.15),rgba(0,0,0,0.05));z-index:10000;flex-direction:column;color:white;text-align:center;-webkit-tap-highlight-color:transparent}
+    #titleOverlay.hidden{display:none}
+    #titleOverlay h1{font-size:28px;margin:0 0 8px 0;text-shadow:0 2px 8px rgba(0,0,0,0.6)}
+    #titleOverlay p{margin:6px 0;color:#fff;opacity:0.95}
   </style>
 </head>
 <body>
   <div id="gameWrap">
     <canvas id="gameCanvas"></canvas>
-
-    <!-- Title overlay -->
     <div id="titleOverlay">
       <h1>Random Character Game</h1>
       <p>Touch to Start</p>
       <p style="font-size:14px;opacity:0.95">Move: ◀ ▶ — Jump: ▲ — Shoot: 🔥 (if you get Fire Flower)</p>
-      <p style="font-size:12px;opacity:0.9">Tip: Collect coins and power-ups. Reach the flag to advance.</p>
+      <p style="font-size:12px;opacity:0.9">Collect coins and power-ups. Reach flags. 25 levels.</p>
       <p id="titleHighScore" style="margin-top:8px;font-size:12px;opacity:0.9"></p>
     </div>
-
-    <!-- HUD small readable area -->
     <div id="hudSmall"></div>
-
-    <!-- Mobile controls (left cluster, center cluster) -->
     <div id="controls">
       <div class="ctl-left-group">
         <button id="btnLeft" class="ctl-btn">◀</button>
@@ -141,7 +44,6 @@
       </div>
     </div>
   </div>
-
   <script src="game.js"></script>
 </body>
 </html>
